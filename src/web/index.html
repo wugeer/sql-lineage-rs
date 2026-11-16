@@ -1,0 +1,1239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HiveLineage · SQL 血缘分析与全局血缘查询</title>
+<style>
+:root{
+  --bg:#f4f5fa; --panel:#ffffff; --ink:#1b2333; --ink2:#5b6478; --line:#e4e7f0;
+  --acc:#3b6ef0; --acc-soft:#e8effe; --src:#0e9f6e; --tgt:#7c3aed; --mid:#2563eb;
+  --temp:#d97706; --view:#0d9488; --res:#db2777; --dir:#64748b; --job:#0284c7; --anchor:#6d28d9;
+  --edge:#9aa5bd; --edge-hi:#1b2333; --edge-agg:#e07b00;
+  --ok:#0e9f6e; --fb:#d97706; --er:#dc2626; --sk:#94a3b8;
+  --shadow:0 1px 3px rgba(20,30,60,.10),0 4px 14px rgba(20,30,60,.07);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font:13px/1.5 "Segoe UI",system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink)}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:7px;padding:5px 10px}
+button:hover{border-color:var(--acc);color:var(--acc)}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+button.pri:hover{filter:brightness(1.06);color:#fff}
+button.mini{padding:2px 7px;font-size:11px;border-radius:5px}
+input,select{font:inherit;border:1px solid var(--line);border-radius:7px;padding:5px 9px;background:#fff;color:var(--ink);outline:none}
+input:focus,select:focus{border-color:var(--acc)}
+.hidden{display:none!important}
+/* ---------- 布局 ---------- */
+#app{display:flex;flex-direction:column;height:100%}
+#topbar{display:flex;align-items:center;gap:10px;padding:8px 14px;background:var(--panel);border-bottom:1px solid var(--line);z-index:30;flex-shrink:0;flex-wrap:wrap}
+#topbar .logo{font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;white-space:nowrap}
+#topbar .logo .lg{width:22px;height:22px;border-radius:6px;background:linear-gradient(135deg,var(--acc),#8b5cf6);display:inline-block}
+#topbar .sp{flex:1}
+.db-pill{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:4px 10px;border-radius:99px;border:1px solid var(--line);cursor:pointer;background:#fafbfe;color:var(--ink2)}
+.db-pill:hover{border-color:var(--acc);color:var(--acc)}
+.db-dot{width:7px;height:7px;border-radius:50%;background:var(--sk)}
+.db-dot.on{background:var(--ok)}
+.db-dot.err{background:var(--er)}
+#statsbar{display:flex;gap:14px;padding:4px 14px;background:#fafbfe;border-bottom:1px solid var(--line);font-size:12px;color:var(--ink2);flex-shrink:0;flex-wrap:wrap;align-items:center}
+#statsbar b{color:var(--ink)}
+#statsbar .st{display:inline-flex;gap:4px;align-items:center}
+#main{flex:1;display:flex;min-height:0}
+#side{width:316px;background:var(--panel);border-right:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0}
+#side .tabs{display:flex;border-bottom:1px solid var(--line)}
+#side .tabs div{flex:1;text-align:center;padding:8px 0;cursor:pointer;color:var(--ink2);font-size:12px;border-bottom:2px solid transparent}
+#side .tabs div.on{color:var(--acc);border-bottom-color:var(--acc);font-weight:600}
+#side .body{flex:1;overflow-y:auto;min-height:0}
+#side .pad{padding:9px 11px}
+#searchBox{width:100%;margin-bottom:8px}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.chip{font-size:11px;padding:2px 9px;border:1px solid var(--line);border-radius:99px;cursor:pointer;background:#fff;color:var(--ink2);user-select:none}
+.chip.on{background:var(--acc-soft);border-color:var(--acc);color:var(--acc);font-weight:600}
+.titem{padding:6px 9px;border-radius:7px;cursor:pointer;margin-bottom:2px}
+.titem:hover{background:#f1f4fb}
+.titem.sel{background:var(--acc-soft);outline:1px solid var(--acc)}
+.titem .nm{font-weight:600;font-size:12px;word-break:break-all}
+.titem .mt{font-size:11px;color:var(--ink2);display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+#listHint{font-size:11px;color:var(--ink2);padding:6px 9px}
+/* ---------- 血缘查询面板 ---------- */
+.qform{display:flex;flex-direction:column;gap:7px;padding-bottom:9px;border-bottom:1px solid var(--line);margin-bottom:9px}
+.qform input,.qform select{width:100%}
+.qrow{display:flex;gap:6px;align-items:center}
+.qrow>*{flex:1;min-width:0}
+.qsec-title{font-size:11.5px;font-weight:600;color:var(--ink);margin:8px 0 4px;display:flex;justify-content:space-between;align-items:center}
+.chain-box{background:#f7f9fe;border:1px solid var(--line);border-radius:7px;padding:6px 8px;font-family:ui-monospace,Consolas,monospace;font-size:11px;margin-bottom:5px;word-break:break-all;line-height:1.5}
+.chain-arrow{color:var(--acc);font-weight:700;padding:0 3px}
+.cand-list{max-height:150px;overflow-y:auto;border:1px solid var(--line);border-radius:7px;margin-top:2px;background:#fff}
+.cand-item{padding:5px 8px;font-size:11.5px;cursor:pointer;border-bottom:1px solid #f1f3f9;display:flex;justify-content:space-between;gap:6px}
+.cand-item:last-child{border-bottom:none}
+.cand-item:hover{background:var(--acc-soft);color:var(--acc)}
+/* ---------- 画布 ---------- */
+#canvasWrap{flex:1;position:relative;overflow:hidden;min-width:0;background:var(--bg)}
+#stage{position:absolute;inset:0;transform-origin:0 0}
+#edgeSvg{position:absolute;top:0;left:0;overflow:visible;pointer-events:none}
+#edgeSvg path{pointer-events:stroke;cursor:pointer}
+#nodes{position:absolute;top:0;left:0}
+.node{position:absolute;width:232px;background:#fff;border:1.4px solid var(--line);border-radius:10px;box-shadow:var(--shadow);transition:opacity .15s,border-color .15s;cursor:pointer;user-select:none}
+.node:hover{border-color:var(--acc)}
+.node.sel,.node.focus-node{border-color:var(--acc);box-shadow:0 0 0 3px var(--acc-soft),var(--shadow)}
+.node.job-node{background:linear-gradient(180deg,#f0f9ff 0%,#ffffff 38px)}
+.node.anchor-node{background:linear-gradient(180deg,#f5f3ff 0%,#ffffff 38px);border-color:var(--anchor)}
+.node.hl{border-color:var(--edge-hi)}
+.node.dim{opacity:.18}
+.node .nh{padding:6px 9px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line)}
+.node .nh .nm{font-weight:600;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.node .nh .tag{font-size:10px;padding:1px 5px;border-radius:4px;flex-shrink:0}
+.node .cnt{padding:3px 9px 5px;font-size:11px;color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.node .cols{padding:2px 0 5px;max-height:340px;overflow:hidden}
+.col{position:relative;padding:2px 9px;font-size:11px;font-family:ui-monospace,Consolas,monospace;display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.col:hover{background:var(--acc-soft)}
+.col.sel{background:var(--acc-soft);font-weight:700;color:var(--acc)}
+.col.hl{background:#fff3d6}
+.col.dim{opacity:.25}
+.col .cn{flex:1;overflow:hidden;text-overflow:ellipsis}
+.col .pt{position:absolute;width:7px;height:7px;border-radius:50%;background:#fff;border:1.6px solid var(--edge);top:50%;transform:translateY(-50%)}
+.col .pl{left:-4px}.col .pr{right:-4px}
+.col .deg{font-size:10px;color:var(--ink2)}
+.col.more{color:var(--ink2);font-style:italic;justify-content:center}
+.tag.k-source{background:#d1f2e5;color:#06734f}.tag.k-target{background:#e9ddfb;color:#6320b8}
+.tag.k-mid{background:#dbe8fd;color:#1e4fb4}.tag.k-temp{background:#fdeacc;color:#92580a}
+.tag.k-view{background:#d3f1ef;color:#0a6b62}.tag.k-result{background:#fad9ea;color:#a1145c}
+.tag.k-directory{background:#e2e8f0;color:#475569}.tag.k-table{background:#eef0f6;color:#4a5470}
+.tag.k-job{background:#e0f2fe;color:#0369a1}.tag.k-anchor_table{background:#ede9fe;color:#5b21b6}
+/* ---------- 右侧抽屉 ---------- */
+#drawer{width:350px;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;flex-shrink:0;transition:margin-right .2s}
+#drawer.hide{margin-right:-350px}
+#drawer .dh{padding:9px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;font-weight:600}
+#drawer .dh .x{margin-left:auto;cursor:pointer;color:var(--ink2);font-size:16px;line-height:1}
+#drawer .db{flex:1;overflow-y:auto;padding:10px 12px;min-height:0}
+.kv{display:flex;gap:8px;font-size:12px;margin-bottom:6px}.kv .k{color:var(--ink2);width:72px;flex-shrink:0}
+.sql{background:#0f1626;color:#d6e2ff;border-radius:8px;padding:10px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;line-height:1.55;max-height:340px;overflow:auto}
+.stmt{border:1px solid var(--line);border-radius:8px;padding:7px 9px;margin-bottom:7px;cursor:pointer}
+.stmt:hover{border-color:var(--acc)}
+.stmt .hd{display:flex;gap:7px;font-size:11px;color:var(--ink2);align-items:center}
+.badge{font-size:10px;padding:1px 6px;border-radius:4px;font-weight:600}
+.badge.ok{background:#d1f2e5;color:#06734f}.badge.fallback{background:#fdeacc;color:#92580a}
+.badge.error{background:#fadcdc;color:#b91c1c}.badge.skipped{background:#e2e8f0;color:#64748b}
+.badge.k{background:#eef0f6;color:#4a5470}
+.stmt .pv{font-size:11px;color:var(--ink2);margin-top:4px;font-family:ui-monospace,Consolas,monospace;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.mini-list{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0}
+.mini-t{font-size:11px;padding:2px 7px;border-radius:5px;background:#eef0f6;cursor:pointer;word-break:break-all}
+.mini-t:hover{background:var(--acc-soft);color:var(--acc)}
+.mini-t.job-pill{background:#e0f2fe;color:#0369a1}
+/* ---------- 画布工具栏 ---------- */
+#toolbar{position:absolute;top:10px;left:10px;z-index:20;display:flex;gap:7px;align-items:center;background:rgba(255,255,255,.92);backdrop-filter:blur(4px);border:1px solid var(--line);border-radius:10px;padding:6px 9px;box-shadow:var(--shadow);flex-wrap:wrap;max-width:calc(100% - 20px)}
+#toolbar .sep{width:1px;height:18px;background:var(--line)}
+#toolbar label{font-size:11px;color:var(--ink2);display:flex;gap:4px;align-items:center}
+#focusInfo{position:absolute;top:10px;right:10px;z-index:20;max-width:48%;background:rgba(255,255,255,.94);border:1px solid var(--line);border-radius:10px;padding:6px 10px;font-size:11.5px;color:var(--ink2);box-shadow:var(--shadow)}
+#focusInfo b{color:var(--ink)}
+/* ---------- 上传区 / 弹窗 ---------- */
+#dropzone{position:absolute;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;background:rgba(244,245,250,.92);backdrop-filter:blur(2px)}
+#dzBox{width:560px;max-width:92%;border:2px dashed #b9c2d8;border-radius:16px;background:#fff;padding:32px 28px;text-align:center;box-shadow:var(--shadow);transition:.15s}
+#dzBox.over{border-color:var(--acc);background:var(--acc-soft)}
+#dzBox h2{font-size:17px;margin-bottom:8px}
+#dzBox p{color:var(--ink2);font-size:12.5px;margin-bottom:14px}
+#dzBox .row{display:flex;gap:9px;justify-content:center;margin-bottom:10px;flex-wrap:wrap;align-items:center}
+#progress{margin-top:12px;display:none}
+#progress .bar{height:8px;background:#e7eaf4;border-radius:99px;overflow:hidden}
+#progress .bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--acc),#8b5cf6);transition:width .15s}
+#progress .pt{font-size:11px;color:var(--ink2);margin-top:5px}
+.modal-mask{position:fixed;inset:0;background:rgba(20,28,48,.45);z-index:60;display:flex;align-items:center;justify-content:center}
+.modal-box{width:660px;max-width:94%;background:#fff;border-radius:14px;box-shadow:0 18px 60px rgba(10,20,50,.3);display:flex;flex-direction:column;max-height:90%}
+.modal-box .mh{padding:12px 16px;border-bottom:1px solid var(--line);font-weight:700;display:flex;align-items:center}
+.modal-box .mh .x{margin-left:auto;cursor:pointer;color:var(--ink2);font-size:18px}
+.modal-box .mbd{padding:12px 16px;flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
+#sqlEdit{width:100%;height:320px;border:1px solid var(--line);border-radius:9px;font-family:ui-monospace,Consolas,monospace;font-size:12px;padding:10px;resize:vertical;outline:none}
+#sqlEdit:focus{border-color:var(--acc)}
+.modal-box .mf{padding:10px 16px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;align-items:center}
+#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:80;background:#1b2333;color:#fff;padding:9px 18px;border-radius:9px;font-size:12.5px;box-shadow:var(--shadow);opacity:0;transition:opacity .2s;pointer-events:none;max-width:80%}
+#empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--ink2)}
+#empty .big{font-size:15px;font-weight:600;color:var(--ink)}
+.edgeLbl{font-size:10.5px;fill:#475569;pointer-events:none;font-weight:500}
+.edgeLblBg{fill:rgba(255,255,255,.88);rx:4;ry:4;pointer-events:none}
+.legend{display:flex;gap:10px;font-size:11px;color:var(--ink2);align-items:center}
+.legend .sw{width:18px;height:0;border-top:2.5px solid var(--edge);display:inline-block;vertical-align:middle;margin-right:3px}
+.legend .sw.d{border-top-style:dashed}
+.legend .sw.a{border-top-color:var(--edge-agg)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="topbar">
+    <div class="logo"><span class="lg"></span>HiveLineage <span style="font-weight:400;color:var(--ink2);font-size:11px">SQL 血缘分析 & 全局血缘图谱</span></div>
+    <button id="btnUpload">上传 SQL 文件</button>
+    <button id="btnEditor">在线输入 SQL</button>
+    <button id="btnOpenQuery" class="pri">血缘查询</button>
+    <button id="btnSaveSession" class="hidden">追加落库</button>
+    <button id="btnExport" class="hidden">导出血缘 JSON</button>
+    <div class="sp"></div>
+    <div class="db-pill" id="btnDbCfg" title="点击配置或切换 PostgreSQL 数据库连接">
+      <span class="db-dot" id="dbDot"></span>
+      <span id="dbStatusTxt">未连接数据库</span>
+    </div>
+    <span id="sessionTag" style="font-size:11px;color:var(--ink2)"></span>
+  </div>
+  <div id="statsbar" class="hidden"></div>
+  <div id="main">
+    <div id="side" class="hidden">
+      <div class="tabs">
+        <div id="tabQuery" class="on">血缘查询</div>
+        <div id="tabTables">会话表</div>
+        <div id="tabStmts">语句</div>
+      </div>
+      <div class="body">
+        <!-- 全局数据库血缘查询面板 -->
+        <div id="paneQuery" class="pad">
+          <div class="chips" id="qTypeChips">
+            <span class="chip on" data-qt="table">表级血缘</span>
+            <span class="chip" data-qt="table_tasks">表的任务血缘</span>
+            <span class="chip" data-qt="task">任务链路</span>
+            <span class="chip" data-qt="column">字段血缘</span>
+          </div>
+          <div class="qform">
+            <div id="qBoxTable">
+              <input id="qTableInput" placeholder="输入 库名.表名（如 dwd.order_detail）">
+              <div id="qTableCands" class="cand-list hidden"></div>
+            </div>
+            <div id="qBoxTask" class="hidden">
+              <input id="qJobInput" placeholder="搜索任务名（如 etl_dag.order_detail）">
+              <div id="qJobCands" class="cand-list hidden"></div>
+            </div>
+            <div id="qBoxCol" class="hidden" style="display:flex;flex-direction:column;gap:6px">
+              <div class="qrow">
+                <input id="qColDb" placeholder="库名（如 dwd）">
+                <input id="qColTbl" placeholder="表名（如 order_detail）">
+              </div>
+              <input id="qColName" placeholder="字段名（如 amt；支持直接粘贴 库.表.字段）">
+            </div>
+            <div class="qrow">
+              <select id="qDir" title="查询方向">
+                <option value="both">上下游</option>
+                <option value="upstream">仅上游</option>
+                <option value="downstream">仅下游</option>
+              </select>
+              <select id="qHops" title="最大追踪跳数">
+                <option value="1">1 跳</option>
+                <option value="2">2 跳</option>
+                <option value="3">3 跳</option>
+                <option value="5" selected>5 跳</option>
+                <option value="15">15 跳</option>
+                <option value="30">30 跳</option>
+                <option value="0">全链路 (不限跳)</option>
+              </select>
+            </div>
+            <div class="qrow" style="justify-content:space-between">
+              <label style="font-size:11px;color:var(--ink2);display:flex;align-items:center;gap:4px">
+                <input type="checkbox" id="qHistory" style="width:auto"> 合并全部历史批次
+              </label>
+              <button class="pri" id="btnRunQuery" style="flex:0 0 auto;padding:5px 16px">查询血缘</button>
+            </div>
+          </div>
+          <div id="qResultPane">
+            <div style="color:var(--ink2);font-size:12px;padding:6px 2px">
+              连接数据库并将解析结果追加落库后，可按 <b>库名.表名</b>、<b>任务名 (dag.task)</b> 或 <b>库名.表名.字段名</b> 查询多跳全局血缘并绘制图形。
+            </div>
+          </div>
+        </div>
+
+        <!-- 单次会话表列表 -->
+        <div id="paneTables" class="pad hidden">
+          <input id="searchBox" placeholder="搜索表名 / 字段名…">
+          <div class="chips" id="roleChips">
+            <span class="chip on" data-role="all">全部</span>
+            <span class="chip" data-role="source">源表</span>
+            <span class="chip" data-role="mid">中间表</span>
+            <span class="chip" data-role="target">目标表</span>
+            <span class="chip" data-role="result">查询结果</span>
+          </div>
+          <div class="chips" id="dbChips"></div>
+          <div id="tableList"></div>
+          <div id="listHint"></div>
+        </div>
+
+        <!-- 单次会话语句列表 -->
+        <div id="paneStmts" class="pad hidden">
+          <div class="chips" id="stmtStatus">
+            <span class="chip on" data-s="">全部</span>
+            <span class="chip" data-s="ok">成功</span>
+            <span class="chip" data-s="fallback">兜底</span>
+            <span class="chip" data-s="error">失败</span>
+            <span class="chip" data-s="skipped">跳过</span>
+          </div>
+          <div id="stmtList"></div>
+          <div id="stmtHint"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="canvasWrap">
+      <div id="toolbar" class="hidden">
+        <label id="modeColWrap"><input type="checkbox" id="modeCol"> 字段级视图</label>
+        <div class="sep" id="sessionHopSep"></div>
+        <label id="sessionHopLbl">跳数
+          <select id="hopSel" style="padding:2px 5px;font-size:11px">
+            <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+            <option value="5">5</option><option value="0">全部</option>
+          </select>
+        </label>
+        <label id="sessionDirLbl">方向
+          <select id="dirSel" style="padding:2px 5px;font-size:11px">
+            <option value="both">上下游</option><option value="upstream">仅上游</option><option value="downstream">仅下游</option>
+          </select>
+        </label>
+        <button class="mini" id="btnRefocus">重新聚焦</button>
+        <div class="sep"></div>
+        <button class="mini" id="btnFit">适应视图</button>
+        <button class="mini" id="btnReset">重置</button>
+        <div class="sep"></div>
+        <div class="legend"><span><i class="sw"></i>直传/边</span><span><i class="sw d"></i>加工</span><span><i class="sw a"></i>聚合</span></div>
+      </div>
+      <div id="focusInfo" class="hidden"></div>
+      <div id="stage"><svg id="edgeSvg"></svg><div id="nodes"></div></div>
+      <div id="empty">
+        <div class="big">上传 / 粘贴 SQL 解析入库，或直接打开数据库全局血缘查询</div>
+        <div>支持携带 dag.task 任务名追加写入 PostgreSQL，毫秒级追踪表级、任务级与 库.表.字段 多跳深层血缘</div>
+        <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap;justify-content:center">
+          <button class="pri" id="btnEmptyUpload">选择 SQL 文件</button>
+          <button id="btnEmptyDemo">载入示例脚本</button>
+          <button id="btnEmptyQuery">打开血缘查询</button>
+        </div>
+      </div>
+      <div id="dropzone" class="hidden">
+        <div id="dzBox">
+          <h2>拖拽 .sql 文件到此处</h2>
+          <p>支持多文件（按顺序视作同一脚本）、UTF-8 / GBK 编码、携带任务名追加落库</p>
+          <div class="row">
+            <button class="pri" id="btnPick">选择文件</button>
+            <input type="text" id="dzDb" placeholder="默认库名（可选）" style="width:155px">
+            <label>SQL 方言 <select id="dzDialect"><option value="">服务默认</option><option value="hive">Hive</option><option value="spark">Spark SQL</option></select></label>
+          </div>
+          <div class="row">
+            <input type="text" id="dzJob" placeholder="任务名 job_name（如 dag.task）" style="width:230px">
+            <label style="font-size:12px;color:var(--ink)"><input type="checkbox" id="dzSaveDb"> 解析后同时追加落库</label>
+          </div>
+          <div class="row" style="font-size:11px;color:var(--ink2)">
+            <label><input type="checkbox" id="dzSel"> 将独立 SELECT 映射为查询结果节点</label>
+          </div>
+          <div id="progress"><div class="bar"><i></i></div><div class="pt"></div></div>
+        </div>
+      </div>
+    </div>
+    <div id="drawer" class="hide">
+      <div class="dh"><span id="dhTitle">详情</span><span class="x" id="dhClose">✕</span></div>
+      <div class="db" id="dhBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 在线输入 SQL 弹窗 -->
+<div id="modal" class="modal-mask hidden">
+  <div class="modal-box">
+    <div class="mh">输入 SQL 脚本<span class="x" id="mClose">✕</span></div>
+    <div class="mbd">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="mDb" placeholder="默认库名（可选）" style="width:140px">
+        <label>SQL 方言 <select id="mDialect"><option value="">服务默认</option><option value="hive">Hive</option><option value="spark">Spark SQL</option></select></label>
+        <label style="font-size:11px;color:var(--ink2)"><input type="checkbox" id="mSel" checked> 独立 SELECT 映射结果节点</label>
+        <button class="mini" id="btnDemo2">填入示例</button>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="mJob" placeholder="任务名 job_name（如 dwd_dag.order_detail）" style="width:270px">
+        <label style="font-size:12px;color:var(--ink)"><input type="checkbox" id="mSaveDb"> 解析后同时追加写入数据库</label>
+      </div>
+      <textarea id="sqlEdit" spellcheck="false" placeholder="粘贴 Hive / Spark SQL…"></textarea>
+    </div>
+    <div class="mf"><button id="mAnalyze" class="pri">分析</button></div>
+  </div>
+</div>
+
+<!-- 数据库连接配置弹窗 -->
+<div id="dbModal" class="modal-mask hidden">
+  <div class="modal-box" style="width:560px">
+    <div class="mh">PostgreSQL 血缘存储配置<span class="x" id="dbClose">✕</span></div>
+    <div class="mbd">
+      <div style="font-size:12px;color:var(--ink2)">
+        采用纯追加写（Append-Only）模式落库，同名 <code>dag.task</code> 默认按最新批次生效，服务端自动启用 Rust 内存热图增量索引加速超深链路查询。
+      </div>
+      <label style="font-size:12px;font-weight:600">连接地址 (DSN)</label>
+      <div style="display:flex;gap:6px">
+        <input id="dbUrlInput" placeholder="postgres://user:password@127.0.0.1:5432/lineage" style="flex:1">
+        <button class="mini" id="btnUseMemDb" title="使用内置内存追加存储快速验证功能">填入 memory://</button>
+      </div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:12px">
+        <label><input type="checkbox" id="dbAutoCreate" checked> 自动建表与创建复合索引</label>
+        <label><input type="checkbox" id="dbHotIndex" checked> 启用 Rust 内存热图增量索引</label>
+      </div>
+      <div>
+        <button class="mini" id="btnShowDdl">查看 PostgreSQL 建表 DDL</button>
+      </div>
+      <pre id="ddlPreview" class="sql hidden" style="max-height:200px"></pre>
+    </div>
+    <div class="mf">
+      <button id="btnSaveDbCfg" class="pri">连接并保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 当前会话补充落库弹窗 -->
+<div id="saveModal" class="modal-mask hidden">
+  <div class="modal-box" style="width:440px">
+    <div class="mh">将当前解析结果追加落库<span class="x" id="saveClose">✕</span></div>
+    <div class="mbd">
+      <div style="font-size:12px;color:var(--ink2)">请输入本次 SQL 脚本对应的调度任务标识（格式如 <code>dag.task</code>）：</div>
+      <input id="saveJobInput" placeholder="例如：dwd_order_dag.task_order_detail" style="width:100%">
+    </div>
+    <div class="mf">
+      <button id="btnConfirmSave" class="pri">确认追加落库</button>
+    </div>
+  </div>
+</div>
+
+<input type="file" id="fileInput" multiple accept=".sql,.hql,.txt" class="hidden">
+<div id="toast"></div>
+<script>
+"use strict";
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const api={
+  async j(url,opt){const r=await fetch(url,opt);const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||("HTTP "+r.status));return d},
+  upload(files,db,sel,dialect,jobName,saveDb,onprog){return new Promise((res,rej)=>{
+    const fd=new FormData();for(const f of files)fd.append("files",f,f.name);
+    if(db)fd.append("default_db",db);if(sel!==undefined)fd.append("analyze_select",sel?"yes":"no");
+    if(dialect)fd.append("dialect",dialect);
+    if(jobName)fd.append("job_name",jobName);
+    if(saveDb)fd.append("save_db","true");
+    const x=new XMLHttpRequest();x.open("POST","/api/analyze");x.responseType="json";
+    x.upload.onprogress=e=>{if(e.lengthComputable&&onprog)onprog(e.loaded/e.total)};
+    x.onload=()=>{const d=x.response||{};x.status<400?res(d):rej(new Error(d.error||("HTTP "+x.status)))};
+    x.onerror=()=>rej(new Error("网络错误"));x.send(fd);
+  })}
+};
+const S={
+  session:null,jobName:"",sourceType:"session",qType:"table",dbConfigured:false,
+  view:null,mode:"table",focus:null,hops:1,dir:"both",
+  selNode:null,selCol:null,hlNodes:null,hlEdges:null,hlCEdges:null,
+  pos:{},W:232,XS:124,GAP:26,scale:1,tx:0,ty:0,expanded:new Set(),
+  role:"all",db:"",q:"",tableOffset:0,stmtStatus:"",stmtOffset:0,initial:null,
+  lastDbResult:null
+};
+const NODE_HEAD=34,COL_H=20,MORE_H=18,COUNT_H=24;
+function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function toast(m){const t=$("#toast");t.textContent=m;t.style.opacity=1;clearTimeout(t._h);t._h=setTimeout(()=>t.style.opacity=0,3000)}
+function fmtBytes(n){if(n>1048576)return(n/1048576).toFixed(1)+" MB";if(n>1024)return(n/1024).toFixed(1)+" KB";return n+" B"}
+
+/* ---------- 数据库状态与配置 ---------- */
+async function refreshDbStatus(){
+  try{
+    const d=await api.j("/api/db/status");
+    S.dbConfigured=!!d.configured;
+    const dot=$("#dbDot"),txt=$("#dbStatusTxt");
+    if(!d.configured){dot.className="db-dot";txt.textContent="未配置数据库";$("#btnDbCfg").title="点击配置 PostgreSQL 连接"}
+    else if(d.ok){dot.className="db-dot on";txt.textContent=`${d.backend==="memory"?"内存库":"PG"} 已连接`;$("#btnDbCfg").title=`${d.masked_url}${d.hot_index?" (热图索引已启用)":""}`}
+    else{dot.className="db-dot err";txt.textContent="数据库异常";$("#btnDbCfg").title=d.error||"连接失败"}
+  }catch(_){}
+}
+refreshDbStatus();
+
+$("#btnDbCfg").onclick=()=>$("#dbModal").classList.remove("hidden");
+$("#dbClose").onclick=()=>$("#dbModal").classList.add("hidden");
+$("#dbModal").addEventListener("click",e=>{if(e.target.id==="dbModal")$("#dbModal").classList.add("hidden")});
+$("#btnUseMemDb").onclick=()=>{$("#dbUrlInput").value="memory://"};
+$("#btnShowDdl").onclick=async()=>{
+  const pre=$("#ddlPreview");
+  if(!pre.classList.contains("hidden")){pre.classList.add("hidden");return}
+  try{const d=await api.j("/api/db/ddl");pre.textContent=d.ddl;pre.classList.remove("hidden")}catch(e){toast(e.message)}
+};
+$("#btnSaveDbCfg").onclick=async()=>{
+  const url=$("#dbUrlInput").value.trim();
+  if(!url){toast("请输入 PostgreSQL 连接串");return}
+  const btn=$("#btnSaveDbCfg");btn.disabled=true;btn.textContent="连接中…";
+  try{
+    await api.j("/api/db/config",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url,auto_create_table:$("#dbAutoCreate").checked,use_hot_index:$("#dbHotIndex").checked})});
+    $("#dbModal").classList.add("hidden");
+    await refreshDbStatus();
+    toast("数据库连接已就绪");
+  }catch(e){toast(e.message)}
+  finally{btn.disabled=false;btn.textContent="连接并保存"}
+};
+
+/* ---------- 当前会话补充落库 ---------- */
+$("#btnSaveSession").onclick=()=>{
+  if(!S.session)return;
+  if(!S.dbConfigured){$("#dbModal").classList.remove("hidden");toast("请先配置数据库连接");return}
+  $("#saveJobInput").value=S.jobName||"";
+  $("#saveModal").classList.remove("hidden");
+};
+$("#saveClose").onclick=()=>$("#saveModal").classList.add("hidden");
+$("#saveModal").addEventListener("click",e=>{if(e.target.id==="saveModal")$("#saveModal").classList.add("hidden")});
+$("#btnConfirmSave").onclick=async()=>{
+  const jn=$("#saveJobInput").value.trim();
+  if(!jn){toast("请填写 job_name（如 dag.task）");return}
+  const btn=$("#btnConfirmSave");btn.disabled=true;btn.textContent="写入中…";
+  try{
+    const r=await api.j(`/api/s/${S.session}/save`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({job_name:jn})});
+    S.jobName=r.saved.job_name;
+    $("#saveModal").classList.add("hidden");
+    toast(`已追加落库：${r.saved.job_name} (batch ${r.saved.batch_id})`);
+  }catch(e){toast(e.message)}
+  finally{btn.disabled=false;btn.textContent="确认追加落库"}
+};
+
+/* ---------- 侧边栏标签切换 ---------- */
+function activateSideTab(which){
+  $("#side").classList.remove("hidden");
+  const map={query:["#tabQuery","#paneQuery"],tables:["#tabTables","#paneTables"],stmts:["#tabStmts","#paneStmts"]};
+  for(const k in map){
+    $(map[k][0]).classList.toggle("on",k===which);
+    $(map[k][1]).classList.toggle("hidden",k!==which);
+  }
+  if(which==="stmts"&&S.session&&!$("#stmtList").children.length)loadStmts(true);
+}
+$("#tabQuery").onclick=()=>activateSideTab("query");
+$("#tabTables").onclick=()=>activateSideTab("tables");
+$("#tabStmts").onclick=()=>activateSideTab("stmts");
+$("#btnOpenQuery").onclick=()=>activateSideTab("query");
+$("#btnEmptyQuery").onclick=()=>activateSideTab("query");
+
+/* ---------- 表列表（会话模式） ---------- */
+function kindTag(t){
+  const k=t.kind==="table"?(t.is_source&&t.is_target?"mid":t.is_target?"target":t.is_source?"source":"table"):t.kind;
+  const names={source:"源表",target:"目标",mid:"中间",table:"表",temp:"临时",view:"视图",result:"结果",directory:"目录",job:"任务",anchor_table:"锚点表"};
+  return `<span class="tag k-${k}">${names[k]||k}</span>`;
+}
+async function loadTables(reset){
+  if(!S.session)return; if(reset){S.tableOffset=0;$("#tableList").innerHTML="";$("#listHint").textContent="加载中…"}
+  const p=new URLSearchParams({q:S.q,role:S.role,db:S.db,offset:S.tableOffset,limit:80});
+  const d=await api.j(`/api/s/${S.session}/tables?`+p);
+  const el=$("#tableList");
+  for(const t of d.items){const dv=document.createElement("div");dv.className="titem";dv.dataset.id=t.id;
+    dv.innerHTML=`<div class="nm">${esc(t.name)}</div><div class="mt">${kindTag(t)}<span>${t.ncols}列</span><span>入${t.in_degree}/出${t.out_degree}</span></div>`;
+    dv.onclick=()=>focusTable(t.id);el.appendChild(dv);}
+  S.tableOffset+=d.items.length;
+  $("#listHint").innerHTML=S.tableOffset<d.total?`已显示 ${S.tableOffset} / ${d.total} 张 <a href="#" id="moreT">继续加载</a>`:`共 ${d.total} 张`;
+  const m=$("#moreT");if(m)m.onclick=e=>{e.preventDefault();loadTables(false)};
+}
+async function loadStmts(reset){
+  if(!S.session)return; if(reset){S.stmtOffset=0;$("#stmtList").innerHTML="";$("#stmtHint").textContent="加载中…"}
+  const p=new URLSearchParams({status:S.stmtStatus,offset:S.stmtOffset,limit:50});
+  const d=await api.j(`/api/s/${S.session}/statements?`+p);
+  const el=$("#stmtList");
+  for(const s of d.items){const dv=document.createElement("div");dv.className="stmt";dv.dataset.idx=s.index;
+    dv.innerHTML=`<div class="hd"><span class="badge ${s.status}">${s.status}</span><span class="badge k">${s.kind}</span><span>#${s.index} ${esc(s.file)}:${s.line}</span></div><div class="pv">${esc(s.preview)}</div>`;
+    dv.onclick=()=>showStatement(s.index);el.appendChild(dv);}
+  S.stmtOffset+=d.items.length;
+  $("#stmtHint").innerHTML=S.stmtOffset<d.total?`已显示 ${S.stmtOffset} / ${d.total} 条 <a href="#" id="moreS">继续加载</a>`:`共 ${d.total} 条`;
+  const m=$("#moreS");if(m)m.onclick=e=>{e.preventDefault();loadStmts(false)};
+}
+
+/* ---------- 全局数据库血缘查询 ---------- */
+function switchQueryMode(qt){
+  S.qType=qt;
+  $$("#qTypeChips .chip").forEach(x=>x.classList.toggle("on",x.dataset.qt===qt));
+  $("#qBoxTable").classList.toggle("hidden",qt!=="table"&&qt!=="table_tasks");
+  $("#qBoxTask").classList.toggle("hidden",qt!=="task");
+  $("#qBoxCol").classList.toggle("hidden",qt!=="column");
+}
+$$("#qTypeChips .chip").forEach(c=>c.onclick=()=>switchQueryMode(c.dataset.qt));
+
+/* 支持粘贴 库.表.字段 自动拆分到三个输入框 */
+function trySplitFieldPaste(val){
+  const parts=val.trim().split(".").map(x=>x.trim()).filter(Boolean);
+  if(parts.length>=3){
+    $("#qColName").value=parts.pop();
+    $("#qColTbl").value=parts.pop();
+    $("#qColDb").value=parts.join(".");
+    return true;
+  }
+  return false;
+}
+["#qColDb","#qColTbl","#qColName"].forEach(sel=>{
+  $(sel).addEventListener("input",e=>{if(e.target.value.includes("."))trySplitFieldPaste(e.target.value)});
+});
+
+/* 表名与任务名联想候选 */
+let candTimer=null;
+$("#qTableInput").addEventListener("input",e=>{
+  clearTimeout(candTimer);
+  const v=e.target.value.trim();
+  candTimer=setTimeout(async()=>{
+    if(!S.dbConfigured)return;
+    try{
+      const d=await api.j(`/api/db/tables?q=${encodeURIComponent(v)}&limit=12&all_history=${$("#qHistory").checked}`);
+      const box=$("#qTableCands");
+      if(!d.items.length){box.classList.add("hidden");return}
+      box.innerHTML=d.items.map(it=>`<div class="cand-item" data-v="${esc(it.full_table_name)}"><b>${esc(it.full_table_name)}</b><span style="color:var(--ink2)">产${it.producer_jobs.length}/消${it.consumer_jobs.length}</span></div>`).join("");
+      box.classList.remove("hidden");
+      box.querySelectorAll(".cand-item").forEach(el=>el.onclick=()=>{
+        $("#qTableInput").value=el.dataset.v;box.classList.add("hidden");runDbQuery();
+      });
+    }catch(_){}
+  },180);
+});
+$("#qJobInput").addEventListener("input",e=>{
+  clearTimeout(candTimer);
+  const v=e.target.value.trim();
+  candTimer=setTimeout(async()=>{
+    if(!S.dbConfigured)return;
+    try{
+      const d=await api.j(`/api/db/jobs?q=${encodeURIComponent(v)}&limit=12&all_history=${$("#qHistory").checked}`);
+      const box=$("#qJobCands");
+      if(!d.items.length){box.classList.add("hidden");return}
+      box.innerHTML=d.items.map(it=>`<div class="cand-item" data-v="${esc(it.job_name)}"><b>${esc(it.job_name)}</b><span style="color:var(--ink2)">读${it.source_tables.length}/写${it.target_tables.length}</span></div>`).join("");
+      box.classList.remove("hidden");
+      box.querySelectorAll(".cand-item").forEach(el=>el.onclick=()=>{
+        $("#qJobInput").value=el.dataset.v;box.classList.add("hidden");runDbQuery();
+      });
+    }catch(_){}
+  },180);
+});
+document.addEventListener("click",e=>{
+  if(!e.target.closest("#qBoxTable"))$("#qTableCands").classList.add("hidden");
+  if(!e.target.closest("#qBoxTask"))$("#qJobCands").classList.add("hidden");
+});
+["#qTableInput","#qJobInput","#qColDb","#qColTbl","#qColName"].forEach(s=>{
+  $(s).addEventListener("keydown",e=>{if(e.key==="Enter")runDbQuery()});
+});
+$("#btnRunQuery").onclick=runDbQuery;
+
+function jumpToTableLineage(tbl,asTaskMode){
+  activateSideTab("query");
+  switchQueryMode(asTaskMode?"table_tasks":"table");
+  $("#qTableInput").value=tbl;
+  runDbQuery();
+}
+function jumpToTaskLineage(job){
+  activateSideTab("query");
+  switchQueryMode("task");
+  $("#qJobInput").value=job;
+  runDbQuery();
+}
+function jumpToColLineage(fullTbl,col){
+  activateSideTab("query");
+  switchQueryMode("column");
+  const idx=fullTbl.lastIndexOf(".");
+  $("#qColDb").value=idx>=0?fullTbl.slice(0,idx):"";
+  $("#qColTbl").value=idx>=0?fullTbl.slice(idx+1):fullTbl;
+  $("#qColName").value=col;
+  runDbQuery();
+}
+
+function setCanvasToolbarForSource(srcType,graphMode){
+  const isSess=srcType==="session";
+  $("#sessionHopSep").classList.toggle("hidden",!isSess);
+  $("#sessionHopLbl").classList.toggle("hidden",!isSess);
+  $("#sessionDirLbl").classList.toggle("hidden",!isSess);
+  $("#btnRefocus").classList.toggle("hidden",!isSess);
+  $("#modeColWrap").classList.toggle("hidden",graphMode==="task");
+  $("#toolbar").classList.remove("hidden");
+  $("#empty").classList.add("hidden");
+}
+
+async function runDbQuery(){
+  if(!S.dbConfigured){$("#dbModal").classList.remove("hidden");toast("请先连接 PostgreSQL 数据库");return}
+  const dir=$("#qDir").value,hops=$("#qHops").value,all_history=$("#qHistory").checked;
+  const btn=$("#btnRunQuery");btn.disabled=true;btn.textContent="查询中…";
+  try{
+    let d;
+    if(S.qType==="table"){
+      const table=$("#qTableInput").value.trim();
+      if(!table)throw new Error("请输入 库名.表名");
+      d=await api.j(`/api/db/lineage/table?`+new URLSearchParams({table,direction:dir,hops,all_history}));
+      applyDbGraph(d,"table",`表级血缘：<b>${esc(d.query_table)}</b> · 上游 ${d.upstream_tables.length} 表 / 下游 ${d.downstream_tables.length} 表 / ${d.edges.length} 加工边`);
+      renderTableQuerySummary(d);
+    }else if(S.qType==="table_tasks"){
+      const table=$("#qTableInput").value.trim();
+      if(!table)throw new Error("请输入 库名.表名");
+      d=await api.j(`/api/db/lineage/table_tasks?`+new URLSearchParams({table,direction:dir,hops,all_history}));
+      applyDbGraph(d,"task",`表的任务级血缘：<b>${esc(d.query_table)}</b> · 上游 ${d.upstream_jobs.length} 任务 / 下游 ${d.downstream_jobs.length} 任务`);
+      renderTableTaskSummary(d);
+    }else if(S.qType==="task"){
+      const job=$("#qJobInput").value.trim();
+      if(!job)throw new Error("请输入任务名（如 dag.task）");
+      d=await api.j(`/api/db/lineage/task?`+new URLSearchParams({job,direction:dir,hops,all_history}));
+      applyDbGraph(d,"task",`任务链路：<b>${esc(d.matched_job||d.query_job)}</b> · 上游 ${d.upstream_jobs.length} 任务 / 下游 ${d.downstream_jobs.length} 任务`);
+      renderTaskQuerySummary(d);
+    }else{
+      let db=$("#qColDb").value.trim(),table=$("#qColTbl").value.trim(),column=$("#qColName").value.trim();
+      const p=new URLSearchParams({direction:dir,hops,all_history});
+      if(!table&&column.includes("."))p.set("field",column);
+      else{if(db)p.set("db",db);p.set("table",table);p.set("column",column)}
+      d=await api.j(`/api/db/lineage/column?`+p);
+      applyDbGraph(d,"column",`字段级血缘：<b>${esc(d.query_column)}</b> · 上游 ${d.upstream_columns.length} 字段 / 下游 ${d.downstream_columns.length} 字段`);
+      renderColumnQuerySummary(d);
+    }
+  }catch(e){toast(e.message)}
+  finally{btn.disabled=false;btn.textContent="查询血缘"}
+}
+
+function applyDbGraph(d,gMode,focusHtml){
+  S.sourceType="db";
+  S.lastDbResult=d;
+  const g=d.graph||{tables:[],edges:[],col_edges:[]};
+  g.tables.forEach(t=>{if(t.level===undefined)t.level=0});
+  S.view=g;
+  S.mode=gMode==="column"?"column":"table";
+  $("#modeCol").checked=S.mode==="column";
+  clearHl();
+  if(g.focus_id!=null){
+    S.selNode=g.focus_id;
+    if(g.focus_col)S.selCol={t:g.focus_id,c:g.focus_col};
+  }
+  nameIndex();
+  setCanvasToolbarForSource("db",gMode);
+  $("#focusInfo").innerHTML=focusHtml;
+  $("#focusInfo").classList.remove("hidden");
+  renderGraph();
+  if(g.tables.length)fitView();
+  else toast("未查询到匹配的血缘记录");
+}
+
+function bindJumpLinks(root){
+  root.querySelectorAll("[data-jtbl]").forEach(el=>el.onclick=()=>jumpToTableLineage(el.dataset.jtbl,false));
+  root.querySelectorAll("[data-jtbl-task]").forEach(el=>el.onclick=()=>jumpToTableLineage(el.dataset.jtblTask,true));
+  root.querySelectorAll("[data-jjob]").forEach(el=>el.onclick=()=>jumpToTaskLineage(el.dataset.jjob));
+  root.querySelectorAll("[data-jcol]").forEach(el=>el.onclick=()=>{
+    const [ft,c]=el.dataset.jcol.split("|");jumpToColLineage(ft,c);
+  });
+}
+
+function renderTableQuerySummary(d){
+  let h=`<div class="qsec-title"><span>当前查询表：${esc(d.query_table)}</span><a href="#" data-jtbl-task="${esc(d.query_table)}" style="font-size:11px;color:var(--acc)">看任务血缘</a></div>`;
+  h+=`<div class="qsec-title">上游物理表 (${d.upstream_tables.length})</div><div class="mini-list">`;
+  h+=d.upstream_tables.map(t=>`<span class="mini-t" data-jtbl="${esc(t.full_table_name)}">${esc(t.full_table_name)} <small style="opacity:.65">-${t.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无上游表</span>`;
+  h+=`</div><div class="qsec-title">下游物理表 (${d.downstream_tables.length})</div><div class="mini-list">`;
+  h+=d.downstream_tables.map(t=>`<span class="mini-t" data-jtbl="${esc(t.full_table_name)}">${esc(t.full_table_name)} <small style="opacity:.65">+${t.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无下游表</span>`;
+  h+=`</div>`;
+  const pane=$("#qResultPane");pane.innerHTML=h;
+  pane.querySelectorAll("a[data-jtbl-task]").forEach(a=>a.onclick=e=>{e.preventDefault();jumpToTableLineage(a.dataset.jtblTask,true)});
+  bindJumpLinks(pane);
+}
+
+function renderTableTaskSummary(d){
+  let h=`<div class="qsec-title"><span>锚点表：${esc(d.query_table)}</span><a href="#" data-jtbl="${esc(d.query_table)}" style="font-size:11px;color:var(--acc)">看表血缘</a></div>`;
+  h+=`<div class="qsec-title">直接产出任务 (${d.producer_jobs.length})</div><div class="mini-list">`;
+  h+=d.producer_jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j)}">${esc(j)}</span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无</span>`;
+  h+=`</div><div class="qsec-title">全部上游任务链 (${d.upstream_jobs.length})</div><div class="mini-list">`;
+  h+=d.upstream_jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j.job_name)}">${esc(j.job_name)} <small>-${j.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无</span>`;
+  h+=`</div><div class="qsec-title">直接消费任务 (${d.consumer_jobs.length})</div><div class="mini-list">`;
+  h+=d.consumer_jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j)}">${esc(j)}</span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无</span>`;
+  h+=`</div><div class="qsec-title">全部下游任务链 (${d.downstream_jobs.length})</div><div class="mini-list">`;
+  h+=d.downstream_jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j.job_name)}">${esc(j.job_name)} <small>+${j.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无</span>`;
+  h+=`</div>`;
+  const pane=$("#qResultPane");pane.innerHTML=h;
+  pane.querySelectorAll("a[data-jtbl]").forEach(a=>a.onclick=e=>{e.preventDefault();jumpToTableLineage(a.dataset.jtbl,false)});
+  bindJumpLinks(pane);
+}
+
+function renderTaskQuerySummary(d){
+  let h="";
+  if(!d.matched_job){
+    $("#qResultPane").innerHTML=`<div style="color:var(--er);font-size:12px">未找到匹配 "${esc(d.query_job)}" 的任务</div>`;
+    return;
+  }
+  if(d.candidates&&d.candidates.length>1){
+    h+=`<div class="qsec-title">匹配任务候选 (${d.candidates.length})</div><div class="mini-list">`;
+    h+=d.candidates.map(c=>`<span class="mini-t job-pill" data-jjob="${esc(c.job_name)}">${esc(c.job_name)}</span>`).join("");
+    h+=`</div>`;
+  }
+  h+=`<div class="qsec-title">上游任务 (${d.upstream_jobs.length})</div><div class="mini-list">`;
+  h+=d.upstream_jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j.job_name)}">${esc(j.job_name)} <small>-${j.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无上游任务</span>`;
+  h+=`</div><div class="qsec-title">下游任务 (${d.downstream_jobs.length})</div><div class="mini-list">`;
+  h+=d.downstream_jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j.job_name)}">${esc(j.job_name)} <small>+${j.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无下游任务</span>`;
+  h+=`</div>`;
+  if(d.chains&&d.chains.length){
+    h+=`<div class="qsec-title">任务依赖链路 (${d.chains.length})</div>`;
+    h+=d.chains.slice(0,25).map(ch=>`<div class="chain-box">${ch.map(x=>esc(x)).join(`<span class="chain-arrow">→</span>`)}</div>`).join("");
+  }
+  const pane=$("#qResultPane");pane.innerHTML=h;bindJumpLinks(pane);
+}
+
+function renderColumnQuerySummary(d){
+  let h=`<div class="qsec-title">目标字段：${esc(d.query_column)}</div>`;
+  h+=`<div class="qsec-title">上游 库名.表名.字段名 (${d.upstream_columns.length})</div><div class="mini-list">`;
+  h+=d.upstream_columns.map(c=>`<span class="mini-t" data-jcol="${esc(c.full_table_name)}|${esc(c.column_name)}">${esc(c.qualified_column)} <small style="opacity:.65">-${c.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无上游字段</span>`;
+  h+=`</div><div class="qsec-title">下游 库名.表名.字段名 (${d.downstream_columns.length})</div><div class="mini-list">`;
+  h+=d.downstream_columns.map(c=>`<span class="mini-t" data-jcol="${esc(c.full_table_name)}|${esc(c.column_name)}">${esc(c.qualified_column)} <small style="opacity:.65">+${c.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无下游字段</span>`;
+  h+=`</div>`;
+  if(d.chains&&d.chains.length){
+    h+=`<div class="qsec-title">字段血缘完整链路 (${d.chains.length})</div>`;
+    h+=d.chains.slice(0,40).map(ch=>`<div class="chain-box">${ch.map(x=>x===d.query_column?`<b style="color:var(--acc)">${esc(x)}</b>`:esc(x)).join(`<span class="chain-arrow">→</span>`)}</div>`).join("");
+  }
+  const pane=$("#qResultPane");pane.innerHTML=h;bindJumpLinks(pane);
+}
+
+/* ---------- 视图布局与渲染 ---------- */
+function tableRole(t){
+  if(t.kind==="job"||t.kind==="anchor_table")return t.kind;
+  return t.is_source&&t.is_target?"mid":t.is_target?"target":t.is_source?"source":t.kind;
+}
+const ROLE_COLOR={source:"var(--src)",target:"var(--tgt)",mid:"var(--mid)",temp:"var(--temp)",view:"var(--view)",result:"var(--res)",directory:"var(--dir)",job:"var(--job)",anchor_table:"var(--anchor)",table:"#4a5470"};
+
+function nodeHeight(t){
+  if(S.mode==="table"||t.kind==="job"||t.kind==="anchor_table")return NODE_HEAD+COUNT_H;
+  let h=NODE_HEAD;
+  const lc=t.cols?t.cols.lineage.length:0;const others=(t.cols&&t.cols.other_total)||0;
+  const showOther=S.expanded.has(t.id)&&t.cols?t.cols.other.length:0;
+  h+=Math.min(lc+showOther,60)*COL_H;
+  if(others>0&&!S.expanded.has(t.id))h+=MORE_H;
+  return Math.max(h,NODE_HEAD+COUNT_H);
+}
+function computeLayout(){
+  const tbls=S.view.tables,edges=S.view.edges;
+  const hasLabels=edges.some(e=>e.label);
+  const xStep=S.W+(hasLabels?168:S.XS);
+  const byLevel={};let maxL=0;
+  for(const t of tbls){const l=t.level||0;maxL=Math.max(maxL,l);(byLevel[l]=byLevel[l]||[]).push(t)}
+  for(const l in byLevel)byLevel[l].sort((a,b)=>a.id-b.id);
+  const idxOf={};for(const l in byLevel)byLevel[l].forEach((t,i)=>idxOf[t.id]={l:+l,i});
+  const up={},dn={};for(const e of edges){(dn[e.s]=dn[e.s]||[]).push(e.t);(up[e.t]=up[e.t]||[]).push(e.s)}
+  for(let pass=0;pass<3;pass++){
+    for(let l=1;l<=maxL;l++){const arr=byLevel[l];if(!arr)continue;
+      arr.forEach(t=>{const ns=(up[t.id]||[]).filter(id=>idxOf[id]&&idxOf[id].l<l);t._b=ns.length?ns.reduce((a,id)=>a+idxOf[id].i,0)/ns.length:t._b??1e9});
+      arr.sort((a,b)=>(a._b-b._b)||(a.id-b.id));arr.forEach((t,i)=>idxOf[t.id].i=i)}
+    for(let l=maxL-1;l>=0;l--){const arr=byLevel[l];if(!arr)continue;
+      arr.forEach(t=>{const ns=(dn[t.id]||[]).filter(id=>idxOf[id]&&idxOf[id].l>l);t._b=ns.length?ns.reduce((a,id)=>a+idxOf[id].i,0)/ns.length:t._b??1e9});
+      arr.sort((a,b)=>(a._b-b._b)||(a.id-b.id));arr.forEach((t,i)=>idxOf[t.id].i=i)}
+  }
+  const lvlH={};let maxH=0;
+  for(const l in byLevel){let h=0;for(const t of byLevel[l])h+=nodeHeight(t)+S.GAP;h-=S.GAP;lvlH[l]=h;maxH=Math.max(maxH,h)}
+  S.pos={};
+  for(const l in byLevel){let y=(maxH-lvlH[l])/2;
+    for(const t of byLevel[l]){const h=nodeHeight(t);S.pos[t.id]={x:+l*xStep,y,h};y+=h+S.GAP}}
+}
+function colAnchor(tid,col,side){
+  const p=S.pos[tid];if(!p)return null;
+  const t=S.view.tables.find(x=>x.id===tid);
+  if(!t||S.mode==="table"||!t.cols)return{x:p.x+(side==="r"?S.W:0),y:p.y+NODE_HEAD/2};
+  const lc=t.cols.lineage||[];let idx=lc.findIndex(c=>c.name===col);
+  if(col==="*"||idx<0)return{x:p.x+(side==="r"?S.W:0),y:p.y+NODE_HEAD/2};
+  return{x:p.x+(side==="r"?S.W:0),y:p.y+NODE_HEAD+idx*COL_H+COL_H/2};
+}
+function edgePath(a,b){
+  const dx=Math.max(46,Math.abs(b.x-a.x)*0.42);
+  return`M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${b.x-dx} ${b.y}, ${b.x} ${b.y}`;
+}
+function renderGraph(){
+  const V=S.view;if(!V)return;
+  computeLayout();
+  const nEl=$("#nodes"),svg=$("#edgeSvg");nEl.innerHTML="";svg.innerHTML="";
+  let maxX=0,maxY=0;for(const id in S.pos){const p=S.pos[id];maxX=Math.max(maxX,p.x+S.W);maxY=Math.max(maxY,p.y+p.h)}
+  const frag=document.createDocumentFragment();
+  for(const t of V.tables){
+    const p=S.pos[t.id];const d=document.createElement("div");
+    const role=tableRole(t);
+    d.className="node"
+      +(t.kind==="job"?" job-node":"")
+      +(t.kind==="anchor_table"?" anchor-node":"")
+      +(t.is_focus?" focus-node":"")
+      +(S.selNode===t.id?" sel":"")
+      +(S.hlNodes?(S.hlNodes.has(t.id)?" hl":" dim"):"");
+    d.dataset.id=t.id;d.style.cssText=`left:${p.x}px;top:${p.y}px;border-top:3px solid ${ROLE_COLOR[role]||"#4a5470"}`;
+    let inner=`<div class="nh"><span class="nm" title="${esc(t.name)}">${esc(t.name)}</span>${kindTag(t)}</div>`;
+    if(t.kind==="job"){
+      const rcnt=(t.source_tables||[]).length,wcnt=(t.target_tables||[]).length;
+      inner+=`<div class="cnt">${t.dag_name?`DAG: ${esc(t.dag_name)} · `:""}读 ${rcnt} 表 / 写 ${wcnt} 表</div>`;
+    }else if(t.kind==="anchor_table"){
+      const pcnt=(t.producer_jobs||[]).length,ccnt=(t.consumer_jobs||[]).length;
+      inner+=`<div class="cnt">产出任务 ${pcnt} · 消费任务 ${ccnt}</div>`;
+    }else if(S.mode==="table"){
+      inner+=`<div class="cnt">${t.ncols} 列 · 入 ${t.in_degree} / 出 ${t.out_degree}</div>`;
+    }else if(t.cols){
+      inner+=`<div class="cols">`;
+      const show=S.expanded.has(t.id);
+      const lc=t.cols.lineage||[];
+      lc.slice(0,60).forEach(c=>{
+        const sel=S.selCol&&S.selCol.t===t.id&&S.selCol.c===c.name;
+        const hl=S.hlCEdges&&S.hlCEdges.cols&&S.hlCEdges.cols.has(t.id+":"+c.name);
+        const dim=S.hlCEdges&&!hl;
+        inner+=`<div class="col${sel?" sel":""}${hl?" hl":""}${dim?" dim":""}" data-t="${t.id}" data-c="${esc(c.name)}"><span class="pt pl"></span><span class="cn">${esc(c.name)}</span><span class="deg">${c.in?`←${c.in}`:""}${c.out?` ${c.out}→`:""}</span><span class="pt pr"></span></div>`;
+      });
+      if(show){for(const c of (t.cols.other||[]).slice(0,60-lc.length))inner+=`<div class="col" data-t="${t.id}" data-c="${esc(c)}"><span class="cn" style="opacity:.75">${esc(c)}</span></div>`}
+      else if((t.cols.other_total||0)>0)inner+=`<div class="col more" data-expand="${t.id}">+ ${t.cols.other_total} 列…</div>`;
+      inner+=`</div>`;
+    }
+    d.innerHTML=inner;
+    d.onclick=e=>{if(e.target.closest(".col"))return;onNodeClick(t.id,e)};
+    d.oncontextmenu=e=>{
+      e.preventDefault();
+      if(S.sourceType==="session")focusTable(t.id);
+      else if(t.kind==="job")jumpToTaskLineage(t.name);
+      else jumpToTableLineage(t.name,false);
+    };
+    frag.appendChild(d);
+  }
+  nEl.appendChild(frag);
+
+  const mkPath=(d2,cls,tip,onclick)=>{
+    const p=document.createElementNS("http://www.w3.org/2000/svg","path");
+    p.setAttribute("d",d2);p.setAttribute("class",cls);
+    if(tip){const tt=document.createElementNS("http://www.w3.org/2000/svg","title");tt.textContent=tip;p.appendChild(tt)}
+    if(onclick)p.addEventListener("click",ev=>{ev.stopPropagation();onclick()});
+    return p;
+  };
+  const inHl=(eid)=>!S.hlEdges||S.hlEdges.has(eid);
+  if(S.mode==="table"){
+    for(const e of V.edges){
+      const a=S.pos[e.s],b=S.pos[e.t];if(!a||!b)continue;
+      const pa={x:a.x+S.W,y:a.y+NODE_HEAD/2},pb={x:b.x,y:b.y+NODE_HEAD/2};
+      const key=e.s+"-"+e.t;
+      const cls="e-t"+(inHl(key)?"":" edim")+(S.hlEdges&&S.hlEdges.has(key)?" ehi":"");
+      const tip=e.label?`${nameOf(e.s)} → ${nameOf(e.t)} [${e.label}]`:null;
+      const p=mkPath(edgePath(pa,pb),cls,tip,()=>onEdgeClick(e));
+      p._key=key;svg.appendChild(p);
+      if(e.label&&inHl(key)){
+        const mx=(pa.x+pb.x)/2,my=(pa.y+pb.y)/2-6;
+        const shortLbl=e.label.length>24?e.label.slice(0,23)+"…":e.label;
+        const txt=document.createElementNS("http://www.w3.org/2000/svg","text");
+        txt.setAttribute("x",mx);txt.setAttribute("y",my);
+        txt.setAttribute("text-anchor","middle");txt.setAttribute("class","edgeLbl");
+        txt.textContent=shortLbl;svg.appendChild(txt);
+      }
+    }
+  }else{
+    for(const e of V.col_edges){
+      const a=colAnchor(e.st,e.sc,"r"),b=colAnchor(e.tt,e.tc,"l");if(!a||!b)continue;
+      const agg=e.kind==="aggregate";const drv=e.kind==="derived";
+      const cls="e-c"+(agg?" agg":"")+(drv?" drv":"")+(inHl(e.i)?"":" edim")+(S.hlEdges&&S.hlEdges.has(e.i)?" ehi":"");
+      const jobInfo=e.jobs&&e.jobs.length?` · 任务: ${e.jobs.join(", ")}`:` · ${e.n_stmts} 条语句`;
+      const tip=`${nameOf(e.st)}.${e.sc} → ${nameOf(e.tt)}.${e.tc} [${e.kind}]${jobInfo}`;
+      const p=mkPath(edgePath(a,b),cls,tip,()=>onEdgeClick(null,e));
+      p._key=e.i;svg.appendChild(p);
+    }
+  }
+  svg.setAttribute("width",maxX+60);svg.setAttribute("height",maxY+60);
+  $("#nodes").style.width=maxX+60+"px";$("#nodes").style.height=maxY+60+"px";
+  applyTransform();
+}
+
+/* ---------- 高亮与交互 ---------- */
+function computeHl(tid){
+  const edges=S.view.edges;
+  const up={},dn={};edges.forEach(e=>{(dn[e.s]=dn[e.s]||[]).push(e);(up[e.t]=up[e.t]||[]).push(e)});
+  const nodes=new Set([tid]),ek=new Set();
+  const walk=(start,map)=>{const q=[start];const seen=new Set([start]);
+    while(q.length){const u=q.shift();for(const e of(map[u]||[])){nodes.add(e.s===u?e.t:e.s);ek.add(e.s+"-"+e.t);const v=e.s===u?e.t:e.s;if(!seen.has(v)){seen.add(v);q.push(v)}}}};
+  walk(tid,dn);walk(tid,up);S.hlNodes=nodes;
+  if(S.mode==="column"){
+    const keep=new Set(),cols=new Set();
+    for(const ce of S.view.col_edges){
+      if(nodes.has(ce.st)&&nodes.has(ce.tt)){keep.add(ce.i);cols.add(ce.st+":"+ce.sc);cols.add(ce.tt+":"+ce.tc)}
+    }
+    S.hlEdges=keep;S.hlCEdges={cols};
+  }else S.hlEdges=ek;
+}
+function clearHl(){S.hlNodes=S.hlEdges=S.hlCEdges=S.selCol=null;S.selNode=null}
+function onNodeClick(tid){
+  if(S.selNode===tid&&S.hlNodes){clearHl();renderGraph();return}
+  S.selNode=tid;computeHl(tid);renderGraph();
+  if(S.sourceType==="session")showTableDetail(tid);
+  else showDbNodeDetail(tid);
+}
+function onEdgeClick(edgeObj,colEdge){
+  if(S.sourceType==="session"){
+    if(colEdge)showEdgeStmts(colEdge.st,colEdge.tt,colEdge);
+    else if(edgeObj)showEdgeStmts(edgeObj.s,edgeObj.t);
+  }else{
+    showDbEdgeDetail(edgeObj,colEdge);
+  }
+}
+
+function focusTable(tid){
+  const hops=+$("#hopSel").value,dir=$("#dirSel").value;
+  S.focus={table:tid,hops,dir};clearHl();S.selNode=tid;S.sourceType="session";
+  api.j(`/api/s/${S.session}/subgraph?table=${tid}&hops=${hops}&direction=${dir}`).then(d=>{
+    d.tables.forEach(t=>t.level=t.level===undefined?0:t.level);
+    S.view=d;nameIndex();
+    setCanvasToolbarForSource("session","table");
+    $("#focusInfo").innerHTML=`焦点：<b>${esc(nameOf(tid))}</b> · ${d.tables.length} 表 / ${d.edges.length} 边（${hops||"∞"}跳 ${dir==="both"?"上下游":dir==="upstream"?"上游":"下游"}）`;
+    $("#focusInfo").classList.remove("hidden");renderGraph();fitView();showTableDetail(tid);
+  }).catch(e=>toast(e.message));
+}
+async function traceColumn(tid,col){
+  if(S.sourceType==="db"){
+    const t=S.view.tables.find(x=>x.id===tid);
+    if(t)jumpToColLineage(t.name,col);
+    return;
+  }
+  toast(`追踪 ${col} 全链路…`);
+  const d=await api.j(`/api/s/${S.session}/subgraph?table=${tid}&col=${encodeURIComponent(col)}`);
+  d.tables.forEach(t=>t.level=t.level===undefined?0:t.level);
+  S.view=d;nameIndex();S.mode="column";$("#modeCol").checked=true;clearHl();S.selCol={t:tid,c:col};
+  $("#focusInfo").innerHTML=`字段全链路：<b>${esc(nameOf(tid))}.${esc(col)}</b> · ${d.tables.length} 表 / ${d.col_edges.length} 字段边`;
+  $("#focusInfo").classList.remove("hidden");renderGraph();fitView();
+}
+function nameOf(id){const t=S.view&&S.view.tables.find(x=>x.id===id);return t?t.name:"#"+id}
+
+/* ---------- 详情抽屉 ---------- */
+function openDrawer(title,html){$("#dhTitle").textContent=title;$("#dhBody").innerHTML=html;$("#drawer").classList.remove("hide")}
+
+function showDbNodeDetail(tid){
+  const t=S.view&&S.view.tables.find(x=>x.id===tid);if(!t)return;
+  if(t.kind==="job"){
+    let h=`<div class="kv"><span class="k">任务全名</span><b style="word-break:break-all">${esc(t.name)}</b></div>`;
+    if(t.dag_name)h+=`<div class="kv"><span class="k">所属 DAG</span>${esc(t.dag_name)}</div>`;
+    h+=`<div class="kv"><span class="k">任务节点</span>${esc(t.task_name||t.name)}</div>`;
+    if(t.latest_batch_id)h+=`<div class="kv"><span class="k">最新批次</span><code>${t.latest_batch_id}</code></div>`;
+    const srcs=t.source_tables||[],tgts=t.target_tables||[];
+    h+=`<div class="kv"><span class="k">读取源表</span><div class="mini-list">${srcs.map(x=>`<span class="mini-t" data-jtbl="${esc(x)}">${esc(x)}</span>`).join("")||"<span style='color:var(--ink2)'>无</span>"}</div></div>`;
+    h+=`<div class="kv"><span class="k">写入目标表</span><div class="mini-list">${tgts.map(x=>`<span class="mini-t" data-jtbl="${esc(x)}">${esc(x)}</span>`).join("")||"<span style='color:var(--ink2)'>无</span>"}</div></div>`;
+    h+=`<div style="margin-top:10px"><button class="mini pri" id="dJumpJob">以此任务为中心查上下游任务链</button></div>`;
+    openDrawer("调度任务详情",h);
+    bindJumpLinks($("#dhBody"));
+    $("#dJumpJob").onclick=()=>jumpToTaskLineage(t.name);
+    return;
+  }
+  const pjs=t.producer_jobs||[],cjs=t.consumer_jobs||[],cols=t.columns||[];
+  let h=`<div class="kv"><span class="k">库名.表名</span><b style="word-break:break-all">${esc(t.name)}</b></div>`;
+  h+=`<div class="kv"><span class="k">节点类型</span>${kindTag(t)}</div>`;
+  h+=`<div class="kv"><span class="k">产出任务</span><div class="mini-list">${pjs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j)}">${esc(j)}</span>`).join("")||"<span style='color:var(--ink2)'>无</span>"}</div></div>`;
+  h+=`<div class="kv"><span class="k">消费任务</span><div class="mini-list">${cjs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j)}">${esc(j)}</span>`).join("")||"<span style='color:var(--ink2)'>无</span>"}</div></div>`;
+  if(cols.length){
+    h+=`<div class="kv"><span class="k">点击查字段</span><div class="mini-list" style="max-height:180px;overflow:auto">${cols.map(c=>`<span class="mini-t" data-jcol="${esc(t.name)}|${esc(c)}">${esc(c)}</span>`).join("")}</div></div>`;
+  }
+  h+=`<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+    <button class="mini pri" id="dJumpTbl">查表级加工血缘</button>
+    <button class="mini" id="dJumpTblTask">查任务级血缘</button>
+  </div>`;
+  openDrawer("数据表详情",h);
+  bindJumpLinks($("#dhBody"));
+  $("#dJumpTbl").onclick=()=>jumpToTableLineage(t.name,false);
+  $("#dJumpTblTask").onclick=()=>jumpToTableLineage(t.name,true);
+}
+
+function showDbEdgeDetail(e,ce){
+  if(ce){
+    const srcFull=`${nameOf(ce.st)}.${ce.sc}`,dstFull=`${nameOf(ce.tt)}.${ce.tc}`;
+    let h=`<div class="kv"><span class="k">源字段</span><b>${esc(srcFull)}</b></div>`;
+    h+=`<div class="kv"><span class="k">目标字段</span><b>${esc(dstFull)}</b></div>`;
+    h+=`<div class="kv"><span class="k">加工类型</span><span class="badge k">${esc(ce.kind)}</span></div>`;
+    const js=ce.jobs||[];
+    h+=`<div class="kv"><span class="k">关联任务</span><div class="mini-list">${js.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j)}">${esc(j)}</span>`).join("")||"-"}</div></div>`;
+    openDrawer("字段级血缘边",h);
+    bindJumpLinks($("#dhBody"));
+    return;
+  }
+  if(!e)return;
+  let h=`<div class="kv"><span class="k">上游节点</span><b>${esc(nameOf(e.s))}</b></div>`;
+  h+=`<div class="kv"><span class="k">下游节点</span><b>${esc(nameOf(e.t))}</b></div>`;
+  if(e.jobs&&e.jobs.length){
+    h+=`<div class="kv"><span class="k">加工任务</span><div class="mini-list">${e.jobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j)}">${esc(j)}</span>`).join("")}</div></div>`;
+  }
+  if(e.via_tables&&e.via_tables.length){
+    h+=`<div class="kv"><span class="k">媒介物理表</span><div class="mini-list">${e.via_tables.map(v=>`<span class="mini-t" data-jtbl="${esc(v)}">${esc(v)}</span>`).join("")}</div></div>`;
+  }
+  if(e.sql_preview){
+    h+=`<div style="font-size:11.5px;color:var(--ink2);margin:8px 0 4px">加工 SQL 摘要：</div><div class="sql">${esc(e.sql_preview)}</div>`;
+  }
+  openDrawer("血缘边详情",h);
+  bindJumpLinks($("#dhBody"));
+}
+
+async function showTableDetail(tid){
+  const d=await api.j(`/api/s/${S.session}/table/${tid}`);
+  const t=d.table;
+  let h=`<div class="kv"><span class="k">表名</span><b style="word-break:break-all">${esc(t.name)}</b></div>`;
+  h+=`<div class="kv"><span class="k">类型</span>${kindTag(t)}</div>`;
+  h+=`<div class="kv"><span class="k">列数</span>${t.ncols}</div>`;
+  h+=`<div class="kv"><span class="k">上游表</span><div class="mini-list">${d.up.map(u=>`<span class="mini-t" data-t="${u.id}">${esc(u.name)}</span>`).join("")||"<span style='color:var(--ink2)'>无</span>"}</div></div>`;
+  h+=`<div class="kv"><span class="k">下游表</span><div class="mini-list">${d.down.map(u=>`<span class="mini-t" data-t="${u.id}">${esc(u.name)}</span>`).join("")||"<span style='color:var(--ink2)'>无</span>"}</div></div>`;
+  const lc=t.cols.lineage||[];
+  if(lc.length){h+=`<div class="kv"><span class="k">血缘列</span><div class="mini-list">${lc.map(c=>`<span class="mini-t" data-col="${esc(c.name)}" data-tt="${tid}">${esc(c.name)} <span style="opacity:.6">${c.in?`←${c.in}`:""}${c.out?` ${c.out}→`:""}</span></span>`).join("")}</div></div>`}
+  const all=t.columns||[];if(all.length)h+=`<div class="kv"><span class="k">全部列</span><div class="mini-list" style="max-height:150px;overflow:auto">${all.slice(0,120).map(c=>`<span class="mini-t" data-col="${esc(c)}" data-tt="${tid}">${esc(c)}</span>`).join("")}${all.length>120?`<span class="mini-t">+${all.length-120}</span>`:""}</div></div>`;
+  h+=`<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"><button class="mini" id="dFocus">聚焦此表</button><button class="mini" id="dTrace">字段模式定位</button></div>`;
+  openDrawer("表详情",h);
+  $$("#dhBody .mini-t[data-t]").forEach(el=>el.onclick=()=>focusTable(+el.dataset.t));
+  $$("#dhBody .mini-t[data-col]").forEach(el=>el.onclick=()=>traceColumn(+el.dataset.tt,el.dataset.col));
+  $("#dFocus").onclick=()=>focusTable(tid);
+  $("#dTrace").onclick=()=>{S.mode="column";$("#modeCol").checked=true;renderGraph()};
+}
+async function showStatement(idx){
+  const d=await api.j(`/api/s/${S.session}/statements?ids=${idx}`);
+  const s=d.items[0];if(!s)return;
+  await ensureNames([...s.targets,...s.sources]);
+  let h=`<div class="kv"><span class="k">位置</span>${esc(s.file)} : 第 ${s.line} 行</div>`;
+  h+=`<div class="kv"><span class="k">类型</span><span class="badge k">${s.kind}</span> <span class="badge ${s.status}">${s.status}</span></div>`;
+  if(s.error)h+=`<div class="kv"><span class="k">解析提示</span><span style="color:var(--er);font-size:11px">${esc(s.error)}</span></div>`;
+  if(s.targets.length)h+=`<div class="kv"><span class="k">写入表</span><div class="mini-list">${s.targets.map(t=>`<span class="mini-t" data-t="${t}">${esc(tblName(t))}</span>`).join("")}</div></div>`;
+  if(s.sources.length)h+=`<div class="kv"><span class="k">读取表</span><div class="mini-list">${s.sources.map(t=>`<span class="mini-t" data-t="${t}">${esc(tblName(t))}</span>`).join("")}</div></div>`;
+  h+=`<div class="sql">${esc(s.sql)}</div>`;
+  openDrawer(`语句 #${idx}`,h);
+  $$("#dhBody .mini-t[data-t]").forEach(el=>el.onclick=()=>focusTable(+el.dataset.t));
+}
+async function ensureNames(ids){
+  window._tn=window._tn||{};
+  const need=[...new Set(ids)].filter(id=>!(id in window._tn));
+  if(need.length){try{const d=await api.j(`/api/s/${S.session}/names?ids=${need.join(",")}`);Object.assign(window._tn,d.names)}catch(_){}}
+}
+function tblName(id){const t=(S.view?S.view.tables:[]).find(x=>x.id===id);return t?t.name:(window._tn&&window._tn[id])||("#"+id)}
+async function showEdgeStmts(s,t,ce){
+  const ids=ce?ce.stmts:(S.view.edges.find(e=>e.s===s&&e.t===t)?.stmts||[]);
+  const title=ce?`${nameOf(s)}.${ce.sc} → ${nameOf(t)}.${ce.tc}`:`${nameOf(s)} → ${nameOf(t)}`;
+  const d=await api.j(`/api/s/${S.session}/statements?ids=${ids.join(",")}`);
+  await ensureNames(d.items.flatMap(st=>[...st.targets,...st.sources]));
+  let h="";
+  for(const st of d.items){
+    h+=`<div class="stmt" data-idx="${st.index}"><div class="hd"><span class="badge ${st.status}">${st.status}</span><span class="badge k">${st.kind}</span><span>#${st.index} ${esc(st.file)}:${st.line}</span></div><div class="pv">${esc(st.sql.slice(0,300))}</div></div>`;
+  }
+  openDrawer(`血缘边 · ${title}`,h||"<div style='color:var(--ink2)'>无关联语句</div>");
+  $$("#dhBody .stmt").forEach(el=>el.onclick=()=>showStatement(+el.dataset.idx));
+}
+
+/* ---------- 缩放平移 ---------- */
+function applyTransform(){$("#stage").style.transform=`translate(${S.tx}px,${S.ty}px) scale(${S.scale})`}
+function fitView(){
+  const wrap=$("#canvasWrap");if(!S.view||!S.view.tables.length)return;
+  let minX=1e18,minY=1e18,maxX=0,maxY=0;
+  for(const id in S.pos){const p=S.pos[id];minX=Math.min(minX,p.x);minY=Math.min(minY,p.y);maxX=Math.max(maxX,p.x+S.W);maxY=Math.max(maxY,p.y+p.h)}
+  const w=Math.max(200,wrap.clientWidth-60),h=Math.max(200,wrap.clientHeight-60);
+  const s=Math.min(1.5,Math.min(w/(maxX-minX+60),h/(maxY-minY+60)));
+  S.scale=Math.max(.06,s);
+  S.tx=(wrap.clientWidth-(maxX-minX)*S.scale)/2-minX*S.scale;
+  S.ty=(wrap.clientHeight-(maxY-minY)*S.scale)/2-minY*S.scale;
+  applyTransform();
+}
+(function(){
+  const wrap=$("#canvasWrap");let drag=null;
+  wrap.addEventListener("wheel",e=>{if(!S.view)return;e.preventDefault();
+    const r=wrap.getBoundingClientRect();const mx=e.clientX-r.left,my=e.clientY-r.top;
+    const k=Math.exp(-e.deltaY*0.0012);const ns=Math.min(4,Math.max(.05,S.scale*k));
+    S.tx=mx-(mx-S.tx)*(ns/S.scale);S.ty=my-(my-S.ty)*(ns/S.scale);S.scale=ns;applyTransform();
+  },{passive:false});
+  wrap.addEventListener("pointerdown",e=>{
+    if(e.target.closest(".node,.col,button,input,select,#toolbar,#focusInfo,path"))return;
+    drag={x:e.clientX,y:e.clientY,tx:S.tx,ty:S.ty};wrap.setPointerCapture(e.pointerId);
+  });
+  wrap.addEventListener("pointermove",e=>{if(!drag)return;S.tx=drag.tx+e.clientX-drag.x;S.ty=drag.ty+e.clientY-drag.y;applyTransform()});
+  wrap.addEventListener("pointerup",()=>drag=null);
+  $("#nodes").addEventListener("click",e=>{
+    const c=e.target.closest(".col");
+    if(!c)return;e.stopPropagation();
+    if(c.dataset.expand){S.expanded.add(+c.dataset.expand);renderGraph();return}
+    const t=+c.dataset.t,col=c.dataset.c;
+    if(e.detail>=2||e.shiftKey){traceColumn(t,col);return}
+    if(S.selCol&&S.selCol.t===t&&S.selCol.c===col){clearHl();renderGraph();return}
+    S.selCol={t,c:col};S.selNode=t;computeHl(t);renderGraph();
+  });
+})();
+
+/* ---------- 视图切换 ---------- */
+$("#modeCol").onchange=e=>{S.mode=e.target.checked?"column":"table";clearHl();S.expanded.clear();renderGraph()};
+$("#btnFit").onclick=fitView;
+$("#btnReset").onclick=()=>{clearHl();S.scale=1;S.tx=0;S.ty=0;S.expanded.clear();applyTransform();renderGraph()};
+$("#btnRefocus").onclick=()=>{if(S.focus&&S.sourceType==="session")focusTable(S.focus.table)};
+$("#dhClose").onclick=()=>$("#drawer").classList.add("hide");
+$("#btnExport").onclick=()=>{if(S.session)location.href=`/api/s/${S.session}/export`};
+
+let searchT=null;
+$("#searchBox").oninput=e=>{clearTimeout(searchT);searchT=setTimeout(()=>{S.q=e.target.value.trim().toLowerCase();loadTables(true)},220)};
+$$("#roleChips .chip").forEach(c=>c.onclick=()=>{$$("#roleChips .chip").forEach(x=>x.classList.remove("on"));c.classList.add("on");S.role=c.dataset.role;loadTables(true)});
+$$("#stmtStatus .chip").forEach(c=>c.onclick=()=>{$$("#stmtStatus .chip").forEach(x=>x.classList.remove("on"));c.classList.add("on");S.stmtStatus=c.dataset.s;loadStmts(true)});
+
+/* ---------- 上传 / 分析 ---------- */
+const DEMO=`-- 示例：数仓多层 ETL 血缘
+CREATE TABLE ods.orders (order_id bigint, cust_id bigint, amt decimal(18,2), status string)
+PARTITIONED BY (dt string);
+CREATE TABLE dim.customer (cust_id bigint, name string, region string);
+USE dw;
+CREATE TABLE dwd.order_detail AS
+SELECT o.order_id, o.cust_id, c.region,
+       o.amt, o.dt
+FROM ods.orders o JOIN dim.customer c ON o.cust_id=c.cust_id
+WHERE o.status='paid';
+INSERT OVERWRITE TABLE dws.region_daily PARTITION(dt='\${bizdate}')
+SELECT region, count(distinct order_id) AS orders, sum(amt) AS gmv
+FROM dwd.order_detail WHERE dt='\${bizdate}' GROUP BY region;
+FROM dwd.order_detail d
+INSERT OVERWRITE TABLE ads.top_cust SELECT cust_id, sum(amt) total WHERE dt='\${bizdate}' GROUP BY cust_id
+INSERT OVERWRITE TABLE ads.region_cnt SELECT region, count(*) cnt GROUP BY region;
+MERGE INTO dw.dim_cust t USING (SELECT cust_id, name FROM ods.customer_inc) s
+ON t.cust_id=s.cust_id
+WHEN MATCHED THEN UPDATE SET t.name=s.name
+WHEN NOT MATCHED THEN INSERT (cust_id, name) VALUES (s.cust_id, s.name);`;
+
+function showStats(r){
+  const s=r.stats;
+  let h=`<span class="st">会话 <b>#${r.session}</b></span>`;
+  if(r.job_name)h+=`<span class="st">任务 <b>${esc(r.job_name)}</b></span>`;
+  if(r.saved)h+=`<span class="st" style="color:var(--ok)">已落库批次 <b>#${r.saved.batch_id}</b></span>`;
+  h+=`<span class="st">文件 <b>${r.files.map(f=>esc(f.name)).join(", ")}</b>（${fmtBytes(s.bytes)}）</span>`;
+  h+=`<span class="st">语句 <b>${s.statements}</b></span><span class="st" style="color:var(--ok)">成功 <b>${s.parsed}</b></span><span class="st" style="color:var(--fb)">兜底 <b>${s.fallback}</b></span><span class="st" style="color:var(--er)">失败 <b>${s.failed}</b></span>`;
+  h+=`<span class="st">表 <b>${r.counts.tables}</b></span><span class="st">表边 <b>${r.counts.table_edges}</b></span><span class="st">字段边 <b>${r.counts.column_edges}</b></span><span class="st">耗时 <b>${s.elapsed_ms.toFixed(0)}ms</b></span>`;
+  const sb=$("#statsbar");sb.innerHTML=h;sb.classList.remove("hidden");
+}
+function nameIndex(){window._tn=window._tn||{};if(S.view)for(const t of S.view.tables)window._tn[t.id]=t.name}
+function applyAnalyze(d){
+  S.session=d.session;S.jobName=d.job_name||"";S.initial=d.initial;S.sourceType="session";
+  d.initial.tables.forEach(t=>{t.level=t.level===undefined?0:t.level});
+  S.view={tables:d.initial.tables,edges:d.initial.edges,col_edges:d.initial.col_edges};
+  S.mode="table";$("#modeCol").checked=false;
+  nameIndex();
+  showStats(d);
+  const dbEl=$("#dbChips");dbEl.innerHTML=`<span class="chip on" data-db="">全部库</span>`+d.dbs.slice(0,30).map(x=>`<span class="chip" data-db="${esc(x.db)}">${esc(x.db||"(默认)")} ${x.tables}</span>`).join("");
+  $$("#dbChips .chip").forEach(c=>c.onclick=()=>{$$("#dbChips .chip").forEach(x=>x.classList.remove("on"));c.classList.add("on");S.db=c.dataset.db;loadTables(true)});
+  ["#btnExport","#btnSaveSession"].forEach(s=>$(s).classList.remove("hidden"));
+  activateSideTab("tables");
+  setCanvasToolbarForSource("session","table");
+  $("#sessionTag").textContent="session "+d.session;
+  clearHl();S.expanded.clear();S.selNode=null;
+  S.focus=d.initial.focus_table!=null?{table:d.initial.focus_table,hops:1,dir:"both"}:null;
+  $("#focusInfo").innerHTML=d.initial.full?"全量血缘视图":`大图模式（共 ${d.counts.tables} 表）：已自动聚焦 <b>${esc(tblName(d.initial.focus_table))}</b>（1跳上下游），可搜索/点击任意表重新聚焦`;
+  $("#focusInfo").classList.remove("hidden");
+  $("#stmtList").innerHTML="";
+  renderGraph();fitView();loadTables(true);
+  if(d.saved)toast(`分析并落库成功：${d.saved.job_name} (batch ${d.saved.batch_id})`);
+}
+async function doUpload(files){
+  if(!files||!files.length)return;
+  const saveDb=$("#dzSaveDb").checked,jobName=$("#dzJob").value.trim();
+  if(saveDb&&!jobName){toast("勾选同时追加落库时请填写 job_name（如 dag.task）");return}
+  const dz=$("#dropzone"),pg=$("#progress");
+  dz.classList.remove("hidden");pg.style.display="block";
+  const bar=pg.querySelector("i"),pt=pg.querySelector(".pt");
+  try{
+    pt.textContent="上传中…";
+    const d=await api.upload(files,$("#dzDb").value.trim(),$("#dzSel").checked?true:undefined,$("#dzDialect").value,jobName,saveDb,p=>{bar.style.width=(p*100).toFixed(0)+"%"});
+    pt.textContent="分析中…";bar.style.width="100%";
+    applyAnalyze(d);if(!d.saved)toast("分析完成");
+  }catch(e){toast("分析失败："+e.message)}
+  finally{setTimeout(()=>{dz.classList.add("hidden");pg.style.display="none";bar.style.width="0"},300)}
+}
+$("#btnUpload").onclick=()=>{$("#dropzone").classList.remove("hidden")};
+$("#btnEmptyUpload").onclick=()=>$("#fileInput").click();
+$("#btnPick").onclick=()=>$("#fileInput").click();
+$("#btnEmptyDemo").onclick=()=>{$("#modal").classList.remove("hidden");$("#sqlEdit").value=DEMO;if(!$("#mJob").value)$("#mJob").value="dw_etl_dag.daily_order_pipeline"};
+$("#fileInput").onchange=e=>{doUpload([...e.target.files]);e.target.value=""};
+const dzBox=$("#dzBox"),dzw=$("#dropzone");
+dzw.addEventListener("click",e=>{if(e.target===dzw)dzw.classList.add("hidden")});
+dzBox.ondragover=e=>{e.preventDefault();dzBox.classList.add("over")};
+dzBox.ondragleave=()=>dzBox.classList.remove("over");
+dzBox.ondrop=e=>{e.preventDefault();dzBox.classList.remove("over");doUpload([...e.dataTransfer.files])};
+document.addEventListener("dragover",e=>e.preventDefault());
+document.addEventListener("drop",e=>e.preventDefault());
+$("#btnEditor").onclick=()=>$("#modal").classList.remove("hidden");
+$("#mClose").onclick=()=>$("#modal").classList.add("hidden");
+$("#modal").addEventListener("click",e=>{if(e.target.id==="modal")$("#modal").classList.add("hidden")});
+$("#btnDemo2").onclick=()=>{$("#sqlEdit").value=DEMO;if(!$("#mJob").value)$("#mJob").value="dw_etl_dag.daily_order_pipeline"};
+$("#mAnalyze").onclick=async()=>{
+  const sql=$("#sqlEdit").value;if(!sql.trim()){toast("请输入 SQL");return}
+  const save_db=$("#mSaveDb").checked,job_name=$("#mJob").value.trim();
+  if(save_db&&!job_name){toast("勾选追加写入数据库时请填写任务名 job_name");return}
+  $("#mAnalyze").textContent="分析中…";$("#mAnalyze").disabled=true;
+  try{
+    const d=await api.j("/api/analyze_text",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({sql,name:"editor.sql",default_db:$("#mDb").value.trim()||undefined,analyze_select:$("#mSel").checked?"yes":"no",dialect:$("#mDialect").value||undefined,job_name:job_name||undefined,save_db})});
+    $("#modal").classList.add("hidden");applyAnalyze(d);
+  }catch(e){toast("分析失败："+e.message)}
+  finally{$("#mAnalyze").textContent="分析";$("#mAnalyze").disabled=false}
+};
+const st=document.createElement("style");st.textContent=`
+#edgeSvg path.e-t,#edgeSvg path.e-c{fill:none;stroke:var(--edge);stroke-width:1.6}
+#edgeSvg path.e-c{stroke-width:1.2}
+#edgeSvg path.drv{stroke-dasharray:5 4}
+#edgeSvg path.agg{stroke:var(--edge-agg)}
+#edgeSvg path.ehi{stroke:var(--edge-hi);stroke-width:2.4}
+#edgeSvg path.agg.ehi{stroke:var(--edge-agg)}
+#edgeSvg path.edim{opacity:.08}
+#edgeSvg path:hover{stroke:var(--acc);stroke-width:2.4;opacity:1}`;document.head.appendChild(st);
+</script>
+</body>
+</html>
