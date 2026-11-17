@@ -113,7 +113,7 @@ pub fn substitute<'a>(
 /// 还原占位符：hzv{n}hz -> ${原名}（无占位符时零拷贝返回）
 #[inline]
 pub fn restore_placeholders<'a>(name: &'a str, restore: &[(String, String)]) -> Cow<'a, str> {
-    if restore.is_empty() || !name.contains("hzv") {
+    if restore.is_empty() || name.len() < 6 || !name.contains("hzv") {
         return Cow::Borrowed(name);
     }
     let mut s = name.to_string();

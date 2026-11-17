@@ -358,3 +358,46 @@ llvm-profdata/llvm-cov 位于 `~/.rustup/toolchains/stable-*/lib/rustlib/x86_64-
 - README 结构符合"图>表>文字"要求：1 张全景架构图 + 1 张批次语义图 + 快速上手命令段 + 分组注意事项。
 - 无未报告偏差。
 
+---
+# 第五轮：功能边界修复 + 字段关联表/任务查询扩展 + 测试覆盖网补齐 + 性能优化
+
+## 实施检查清单（第五轮，PLAN）
+1. 修复解析管线边界缺陷（`lexer.rs` 跨行串行号、`preprocess.rs` `SET` 注释与括号 CTAS、`analyzer.rs` 非递归 CTE 遮蔽与不等长 `UNION`）并补充测试
+2. 修复 Web 服务端与 CLI 边界（`server.rs` 会话数字序淘汰、中文 `truncated` 字符数、大小写查表、邻接裁剪与 `parse_select_flag`/`parse_select_mode` 大小写）并补充测试
+3. 扩展 `ColumnLineageResponse`（`upstream_tables`/`downstream_tables`/`upstream_jobs`/`downstream_jobs`）及 WebUI `renderColumnQuerySummary` 展示与跳转并补充测试
+4. 修复持久层与热图索引边界（`extract.rs` temp 自环与表名安全长度、`hot_index.rs` 索引位宽溢出/局部增量更新/检索截断优化/`*` 穿透、`query.rs` 并发同步锁与混合环链、`postgres.rs` 深跳边界与通配对齐）并补充测试
+5. 补齐 `db/{mod,schema,memory,extract,hot_index,query}.rs` 与 `tests/cli.rs` 测试覆盖网并复核 `./scripts/coverage.sh`
+6. 实施性能优化（`Cargo.toml` `opt-level=3`、并行预处理优化、`Catalog` 宽表去重、`Analyzer` `RelCols` 缓存与 CTE 增量回滚、`MemoryBackend` 索引缓存）并对比 10MB 压测，更新 `TASK.md` 与 `README.md`
+
+## 任务进度（第五轮，EXECUTE）
+*   2026-11-17
+    *   步骤：1. 修复解析管线边界缺陷（commit `5914ac4`）
+    *   修改：src/lexer.rs、src/preprocess.rs、src/analyzer.rs、tests/lineage_ext3.rs（t133~t137）
+    *   状态：完成，218 测试全绿
+*   2026-11-17
+    *   步骤：2. 修复 Web 服务端与 CLI 边界（commit `533e8da`）
+    *   修改：src/server.rs、src/main.rs
+    *   状态：完成，219 测试全绿
+*   2026-11-17
+    *   步骤：3. 扩展字段查询关联表/任务血缘输出与 WebUI 展示（commit `be98b5f`）
+    *   修改：src/db/query.rs、src/web/index.html、tests/db_lineage.rs
+    *   状态：完成，219 测试全绿
+*   2026-11-17
+    *   步骤：4. 修复持久层与热图索引边界（commit `44a109b`）
+    *   修改：src/db/extract.rs、src/db/hot_index.rs、src/db/query.rs、src/db/postgres.rs、tests/db_lineage.rs
+    *   状态：完成，220 测试全绿
+*   2026-11-17
+    *   步骤：5. 补齐测试覆盖网（commit `20df49a`）
+    *   修改：src/db/{mod,schema,extract,hot_index,memory,query}.rs、tests/{db_lineage,cli}.rs
+    *   状态：完成，226 测试全绿；全仓除离线 `db/postgres.rs` 外行覆盖率达 ~95%
+*   2026-11-17
+    *   步骤：6. 性能优化与压测、文档收尾
+    *   修改：Cargo.toml（`opt-level = 3`）、src/lib.rs、src/preprocess.rs、src/catalog.rs（含 `wide_table_set_threshold` 单测）、src/analyzer.rs、src/db/memory.rs、README.md、TASK.md
+    *   压测结果（10.01MB，35,783 语句）：`elapsed` 1703.7ms → **1031.3ms**（提速约 39.5%）；其中 `decode+split` 69.9ms→23.4ms、`preprocess` 156.4ms→27.4ms、`walk` 1144.4ms→727.6ms；二进制体积 4.0MB→6.1MB
+    *   状态：完成
+
+## 最终审查（第五轮，REVIEW）
+- 检查清单 1-6 全部实施完毕，无未报告偏差。
+- `cargo fmt --check` 与 `cargo clippy --all-targets`：0 warning；`cargo test`：全量 227 测试通过。
+- Hive/Spark 表级与列级解析、表查表/表查任务/任务查任务/字段查字段/字段查表/字段查任务全链路均经测试覆盖并验证通过。
+

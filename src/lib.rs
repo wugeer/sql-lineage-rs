@@ -238,18 +238,30 @@ pub fn analyze_with_sources(files: Vec<InputFile>, opts: &Options) -> AnalyzedWo
         let mut works: Vec<Work> = if any_vars {
             let mut vars: HashMap<String, String> = HashMap::default();
             let mut intern: HashMap<String, usize> = HashMap::default();
-            raws.iter()
-                .enumerate()
-                .map(|(i, (fi, raw))| {
-                    let text = &texts[*fi][raw.start..raw.end];
-                    let (w, kv) = build_work(
-                        i,
-                        classify(substitute(text, &vars, &mut intern, &mut restore)),
-                    );
-                    if let Some((k, v)) = kv {
-                        vars.insert(k, v);
+            // 先顺序处理变量替换与 SET 语句，其余语句留给 rayon 并行 tokenize/classify
+            let mut staged: Vec<Result<Work, Cow<'_, str>>> = Vec::with_capacity(raws.len());
+            for (i, (fi, raw)) in raws.iter().enumerate() {
+                let text = &texts[*fi][raw.start..raw.end];
+                let sub = substitute(text, &vars, &mut intern, &mut restore);
+                if let Some(t0) = lexer::first_token(&sub) {
+                    if t0.kind == lexer::TokKind::Word && t0.slice(&sub).eq_ignore_ascii_case("set")
+                    {
+                        let (w, kv) = build_work(i, classify(sub));
+                        if let Some((k, v)) = kv {
+                            vars.insert(k, v);
+                        }
+                        staged.push(Ok(w));
+                        continue;
                     }
-                    w
+                }
+                staged.push(Err(sub));
+            }
+            staged
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, item)| match item {
+                    Ok(w) => w,
+                    Err(sub) => build_work(i, classify(sub)).0,
                 })
                 .collect()
         } else {

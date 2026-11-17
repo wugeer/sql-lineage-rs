@@ -60,12 +60,18 @@ pub struct RelCols {
     pub unknown: bool,
 }
 
+#[derive(Clone)]
+struct CteEntry {
+    cols: Rc<Vec<ColOut>>,
+    unknown: bool,
+}
+
 struct Rel {
     /// 可匹配的名字：别名 / 表全名 / 表末段名
-    names: Vec<String>,
+    names: smallvec::SmallVec<[String; 3]>,
     /// 物理表 intern id
     base: Option<usize>,
-    cols: Vec<ColOut>,
+    cols: Rc<Vec<ColOut>>,
     /// 列集合是否完整已知
     known: bool,
 }
@@ -191,7 +197,9 @@ pub struct Analyzer {
     is_tgt: Vec<bool>,
     /// CREATE TEMPORARY TABLE 名（不加库前缀）
     temp: HashSet<String>,
-    ctes: HashMap<String, Rc<RelCols>>,
+    ctes: HashMap<String, CteEntry>,
+    empty_cols: Rc<Vec<ColOut>>,
+    rel_cache: Vec<Option<(u32, Rc<Vec<ColOut>>)>>,
 
     stmt_idx: usize,
     cur_targets: Vec<usize>,
@@ -232,6 +240,8 @@ impl Analyzer {
             is_tgt: Vec::new(),
             temp: HashSet::default(),
             ctes: HashMap::default(),
+            empty_cols: Rc::new(Vec::new()),
+            rel_cache: Vec::new(),
             stmt_idx: 0,
             cur_targets: Vec::new(),
             cur_tgt_seen: HashSet::default(),
@@ -911,12 +921,20 @@ impl Analyzer {
     // ---------- 查询 ----------
 
     pub fn query(&mut self, q: &Query) -> RelCols {
-        let saved = q.with.as_ref().map(|_| self.ctes.clone());
+        let mut saved: Vec<(String, Option<CteEntry>)> = Vec::new();
         if let Some(w) = &q.with {
+            saved.reserve(w.cte_tables.len());
             for cte in &w.cte_tables {
                 let key = lower_cow(&cte.alias.name.value).into_owned();
+                let prev = self.ctes.get(&key).cloned();
                 if w.recursive {
-                    self.ctes.insert(key.clone(), Rc::new(RelCols::default()));
+                    self.ctes.insert(
+                        key.clone(),
+                        CteEntry {
+                            cols: self.empty_cols.clone(),
+                            unknown: false,
+                        },
+                    );
                 }
                 let mut rc = self.query(&cte.query);
                 if !cte.alias.columns.is_empty() {
@@ -927,7 +945,15 @@ impl Analyzer {
                         }
                     }
                 }
-                self.ctes.insert(key, Rc::new(rc));
+                let entry = CteEntry {
+                    cols: Rc::new(rc.cols),
+                    unknown: rc.unknown,
+                };
+                let old = self.ctes.insert(key.clone(), entry);
+                // 仅保存进入本 WITH 块之前的原始映射
+                if !saved.iter().any(|(k, _)| k == &key) {
+                    saved.push((key, if w.recursive { prev } else { old }));
+                }
             }
         }
         let out = self.set_expr(&q.body);
@@ -939,8 +965,15 @@ impl Analyzer {
                 }
             }
         }
-        if let Some(s) = saved {
-            self.ctes = s;
+        for (k, prev) in saved {
+            match prev {
+                Some(v) => {
+                    self.ctes.insert(k, v);
+                }
+                None => {
+                    self.ctes.remove(&k);
+                }
+            }
         }
         out
     }
@@ -1100,13 +1133,13 @@ impl Analyzer {
             TableFactor::Table { name, alias, .. } => {
                 let parts = name_parts(name);
                 if parts.len() == 1 {
-                    if let Some(rc) = self.ctes.get(&parts[0]).cloned() {
+                    if let Some(rc) = self.ctes.get(&parts[0]) {
                         let an = alias
                             .as_ref()
                             .map(|a| lower_cow(&a.name.value).into_owned())
                             .unwrap_or_else(|| parts[0].clone());
                         sc.rels.push(Rel {
-                            names: vec![an],
+                            names: smallvec::smallvec![an],
                             base: None,
                             cols: rc.cols.clone(),
                             known: !rc.unknown,
@@ -1119,29 +1152,44 @@ impl Analyzer {
                 if mark_src {
                     self.mark_source(id);
                 }
-                let mut names = Vec::with_capacity(3);
+                let mut names: smallvec::SmallVec<[String; 3]> = smallvec::SmallVec::new();
                 if let Some(a) = alias {
                     names.push(lower_cow(&a.name.value).into_owned());
                 }
                 names.push(parts.join("."));
                 if let Some(last) = parts.last() {
-                    names.push(last.clone());
+                    if names.last().map(String::as_str) != Some(last.as_str()) {
+                        names.push(last.clone());
+                    }
                 }
                 let (cols, known) = match self.catalog.get(id) {
-                    Some(cl) => (
-                        cl.iter()
-                            .map(|&c| ColOut {
-                                name: c,
-                                srcs: Rc::new(smallvec::smallvec![ColSrc {
-                                    table: id,
-                                    col: c,
-                                    kind: Kind::Direct,
-                                }]),
-                            })
-                            .collect(),
-                        true,
-                    ),
-                    None => (Vec::new(), false),
+                    Some(cl) => {
+                        let ver = self.catalog.version(id);
+                        if self.rel_cache.len() <= id {
+                            self.rel_cache.resize(id + 1, None);
+                        }
+                        let cached = match &self.rel_cache[id] {
+                            Some((cv, rc)) if *cv == ver => rc.clone(),
+                            _ => {
+                                let built: Rc<Vec<ColOut>> = Rc::new(
+                                    cl.iter()
+                                        .map(|&c| ColOut {
+                                            name: c,
+                                            srcs: Rc::new(smallvec::smallvec![ColSrc {
+                                                table: id,
+                                                col: c,
+                                                kind: Kind::Direct,
+                                            }]),
+                                        })
+                                        .collect(),
+                                );
+                                self.rel_cache[id] = Some((ver, built.clone()));
+                                built
+                            }
+                        };
+                        (cached, true)
+                    }
+                    None => (self.empty_cols.clone(), false),
                 };
                 sc.rels.push(Rel {
                     names,
@@ -1154,7 +1202,7 @@ impl Analyzer {
                 subquery, alias, ..
             } => {
                 let mut rc = self.query(subquery);
-                let mut names = Vec::new();
+                let mut names: smallvec::SmallVec<[String; 3]> = smallvec::SmallVec::new();
                 if let Some(a) = alias {
                     names.push(lower_cow(&a.name.value).into_owned());
                     if !a.columns.is_empty() {
@@ -1169,7 +1217,7 @@ impl Analyzer {
                 sc.rels.push(Rel {
                     names,
                     base: None,
-                    cols: rc.cols,
+                    cols: Rc::new(rc.cols),
                     known: !rc.unknown,
                 });
             }
@@ -1202,12 +1250,12 @@ impl Analyzer {
                             .unwrap_or_default()
                     });
                 sc.rels.push(Rel {
-                    names: vec![n],
+                    names: smallvec::smallvec![n],
                     base: None,
-                    cols: vec![ColOut {
+                    cols: Rc::new(vec![ColOut {
                         name: STAR_COL,
                         srcs: Rc::new(star),
-                    }],
+                    }]),
                     known: false,
                 });
             }
@@ -1223,12 +1271,12 @@ impl Analyzer {
                     .map(|a| lower_cow(&a.name.value).into_owned())
                     .unwrap_or_default();
                 sc.rels.push(Rel {
-                    names: vec![n],
+                    names: smallvec::smallvec![n],
                     base: None,
-                    cols: vec![ColOut {
+                    cols: Rc::new(vec![ColOut {
                         name: STAR_COL,
                         srcs: Rc::new(star),
-                    }],
+                    }]),
                     known: false,
                 });
             }
@@ -1239,12 +1287,12 @@ impl Analyzer {
                     .map(|a| lower_cow(&a.name.value).into_owned())
                     .unwrap_or_default();
                 sc.rels.push(Rel {
-                    names: vec![n],
+                    names: smallvec::smallvec![n],
                     base: None,
-                    cols: vec![ColOut {
+                    cols: Rc::new(vec![ColOut {
                         name: STAR_COL,
                         srcs: Rc::new(star),
-                    }],
+                    }]),
                     known: false,
                 });
             }
@@ -1260,12 +1308,12 @@ impl Analyzer {
                     .map(|a| lower_cow(&a.name.value).into_owned())
                     .unwrap_or_default();
                 sc.rels.push(Rel {
-                    names: vec![n],
+                    names: smallvec::smallvec![n],
                     base: None,
-                    cols: vec![ColOut {
+                    cols: Rc::new(vec![ColOut {
                         name: STAR_COL,
                         srcs: Rc::new(star),
-                    }],
+                    }]),
                     known: false,
                 });
             }
@@ -1307,15 +1355,17 @@ impl Analyzer {
             }
         };
         sc.rels.push(Rel {
-            names: vec![name],
+            names: smallvec::smallvec![name],
             base: None,
-            cols: col_ids
-                .into_iter()
-                .map(|cid| ColOut {
-                    name: cid,
-                    srcs: shared.clone(),
-                })
-                .collect(),
+            cols: Rc::new(
+                col_ids
+                    .into_iter()
+                    .map(|cid| ColOut {
+                        name: cid,
+                        srcs: shared.clone(),
+                    })
+                    .collect(),
+            ),
             known: true,
         });
     }

@@ -72,10 +72,10 @@ Hive / Spark SQL 血缘分析工具（Rust）。输入一个或多个 SQL 文件
 ## 构建
 
 ```bash
-cargo build --release          # 产出 target/release/hive-lineage（约 4MB）
+cargo build --release          # 产出 target/release/hive-lineage（约 6.1MB）
 ```
 
-release 配置已按产物体积调优（`opt-level="z"` + fat LTO + `codegen-units=1` + 符号裁剪 + `panic=abort`）；如需调试符号或更快编译，自行调整 `Cargo.toml` 的 `[profile.release]`。
+release 配置面向吞吐优化（`opt-level=3` + fat LTO + `codegen-units=1` + 符号裁剪 + `panic=abort`）；如需极致体积（~4MB）或调试符号，自行调整 `Cargo.toml` 的 `[profile.release]`。
 
 ## 使用
 
@@ -215,7 +215,7 @@ hive-lineage serve -p 3000 --db-url postgres://user:pass@127.0.0.1:5432/lineage 
 | GET | `/api/db/lineage/table` | 表级血缘：`table`、`direction`、`hops`、`all_history` → 上下游表 + 边 + `graph` |
 | GET | `/api/db/lineage/table_tasks` | 表的任务级血缘：`table`、`direction`、`hops`、`all_history` → 产出/消费任务 + 任务链路 + `graph` |
 | GET | `/api/db/lineage/task` | 任务链路：`job`（支持模糊）、`direction`、`hops`、`all_history` → 上下游任务 + `chains` + `graph` |
-| GET | `/api/db/lineage/column` | 字段血缘：`db`+`table`+`column` 或 `field=库名.表名.字段名`、`direction`、`hops`、`all_history` → 上下游 `库名.表名.字段名` + `chains` + `graph` |
+| GET | `/api/db/lineage/column` | 字段血缘：`db`+`table`+`column` 或 `field=库名.表名.字段名`、`direction`、`hops`、`all_history` → 上下游字段 + 关联上下游表（`upstream_tables`/`downstream_tables`）+ 关联上下游任务（`upstream_jobs`/`downstream_jobs`）+ `chains` + `graph` |
 
 分析接口的 `dialect` 字段（`hive`/`spark`）省略时沿用 `serve --dialect` 启动默认值，显式传入则按请求覆盖；非法值返回 400。网页上传区与 SQL 编辑器各有一个方言选择框（默认"服务默认"，即不发送该字段）。
 
@@ -298,18 +298,19 @@ rustup component add llvm-tools-preview   # 如未安装
 ./scripts/coverage.sh                     # 自动编译插桩、跑测试、合并并输出报告
 ```
 
-当前基线（行覆盖口径，测试含 `tests/db_lineage.rs` 血缘入库集成套件）：
+当前基线（行覆盖口径，含 `tests/db_lineage.rs` 等 227 个自动化测试）：
 
 | 文件 | 行覆盖 | 备注 |
 |------|--------|------|
 | lib.rs | ~99% | |
-| analyzer.rs | ~91% | 未覆盖多为非 Hive 方言可达的 AST 分支（Pivot/MatchRecognize/JsonTable 等的部分子臂） |
+| analyzer.rs | ~90% | 未覆盖多为非 Hive 方言可达的 AST 分支（Pivot/MatchRecognize/JsonTable 等的部分子臂） |
 | fallback.rs | ~97% | |
-| preprocess.rs | ~98% | |
+| preprocess.rs | ~97% | |
 | catalog.rs | ~98% | |
 | lexer.rs | ~98% | |
-| server.rs | ~98% | 含全部路由 handler、图遍历、错误路径与 `run()` 启动路径 |
-| **总计** | **~95%** | src/ 全部源码口径（含 `main.rs`/`bench_parse.rs` 二进制壳）；接入前为 ~52% |
+| server.rs | ~97% | 含全部路由 handler、图遍历、错误路径与 `run()` 启动路径 |
+| db/{mod,schema,extract,hot_index,memory,query}.rs | ~94%~100% | `db/postgres.rs` 在无外部 PG 实例的离线单测下约 5.4%，需配合真实 PG 容器测试 |
+| **总计（不含离线 PG SQL 路径）** | **~95%** | 全仓含 `db/postgres.rs` 离线口径约 **86.5%** |
 
 未覆盖区主要是：其他 SQL 方言才可产生的 AST 分支（analyzer.rs 约 184 行）、个别防御性死代码臂（如仅特定 AST 形态可达的 `continue`/`return` 兜底）。非 Hive 方言不可达的变体已通过内部 `#[cfg(test)]` 测试用 GenericDialect/手工构造 AST 尽可能覆盖。
 

@@ -6,11 +6,18 @@ use crate::db::{
     RawColumnSubgraph, RawTableSubgraph, RawTaskSubgraph, TableSearchItem,
 };
 use rustc_hash::FxHashMap as HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+
+#[derive(Default)]
+struct MemoryState {
+    batches: Vec<BatchPayload>,
+    latest_cache: Option<Arc<HotGraphIndex>>,
+    history_cache: Option<Arc<HotGraphIndex>>,
+}
 
 #[derive(Default)]
 pub struct MemoryBackend {
-    batches: RwLock<Vec<BatchPayload>>,
+    state: RwLock<MemoryState>,
 }
 
 impl MemoryBackend {
@@ -18,9 +25,34 @@ impl MemoryBackend {
         Self::default()
     }
 
-    fn build_index(&self, scope: QueryScope) -> HotGraphIndex {
-        let guard = self.batches.read().unwrap();
-        HotGraphIndex::from_batches(&guard, scope == QueryScope::AllHistory)
+    fn get_or_build_index(&self, scope: QueryScope) -> Arc<HotGraphIndex> {
+        {
+            let guard = self.state.read().unwrap();
+            let cached = match scope {
+                QueryScope::LatestBatch => guard.latest_cache.as_ref(),
+                QueryScope::AllHistory => guard.history_cache.as_ref(),
+            };
+            if let Some(idx) = cached {
+                return idx.clone();
+            }
+        }
+        let mut guard = self.state.write().unwrap();
+        let cached = match scope {
+            QueryScope::LatestBatch => guard.latest_cache.as_ref(),
+            QueryScope::AllHistory => guard.history_cache.as_ref(),
+        };
+        if let Some(idx) = cached {
+            return idx.clone();
+        }
+        let built = Arc::new(HotGraphIndex::from_batches(
+            &guard.batches,
+            scope == QueryScope::AllHistory,
+        ));
+        match scope {
+            QueryScope::LatestBatch => guard.latest_cache = Some(built.clone()),
+            QueryScope::AllHistory => guard.history_cache = Some(built.clone()),
+        }
+        built
     }
 }
 
@@ -39,16 +71,19 @@ impl LineageBackend for MemoryBackend {
 
     fn append_batch<'a>(&'a self, payload: &'a BatchPayload) -> BoxFut<'a, ()> {
         Box::pin(async move {
-            self.batches.write().unwrap().push(payload.clone());
+            let mut guard = self.state.write().unwrap();
+            guard.batches.push(payload.clone());
+            guard.latest_cache = None;
+            guard.history_cache = None;
             Ok(())
         })
     }
 
     fn load_latest_snapshot(&self) -> BoxFut<'_, Vec<BatchPayload>> {
         Box::pin(async move {
-            let guard = self.batches.read().unwrap();
+            let guard = self.state.read().unwrap();
             let mut latest: HashMap<String, BatchPayload> = HashMap::default();
-            for bp in guard.iter() {
+            for bp in guard.batches.iter() {
                 match latest.get(&bp.batch.job_name) {
                     Some(cur) if cur.batch.batch_id >= bp.batch.batch_id => {}
                     _ => {
@@ -64,8 +99,9 @@ impl LineageBackend for MemoryBackend {
 
     fn fetch_batches_since(&self, after_batch_id: i64) -> BoxFut<'_, Vec<BatchPayload>> {
         Box::pin(async move {
-            let guard = self.batches.read().unwrap();
+            let guard = self.state.read().unwrap();
             let mut out: Vec<BatchPayload> = guard
+                .batches
                 .iter()
                 .filter(|bp| bp.batch.batch_id > after_batch_id)
                 .cloned()
@@ -81,7 +117,7 @@ impl LineageBackend for MemoryBackend {
         limit: usize,
         scope: QueryScope,
     ) -> BoxFut<'a, Vec<JobSearchItem>> {
-        Box::pin(async move { Ok(self.build_index(scope).search_jobs(keyword, limit)) })
+        Box::pin(async move { Ok(self.get_or_build_index(scope).search_jobs(keyword, limit)) })
     }
 
     fn search_tables<'a>(
@@ -90,7 +126,7 @@ impl LineageBackend for MemoryBackend {
         limit: usize,
         scope: QueryScope,
     ) -> BoxFut<'a, Vec<TableSearchItem>> {
-        Box::pin(async move { Ok(self.build_index(scope).search_tables(keyword, limit)) })
+        Box::pin(async move { Ok(self.get_or_build_index(scope).search_tables(keyword, limit)) })
     }
 
     fn query_table_subgraph<'a>(
@@ -102,7 +138,7 @@ impl LineageBackend for MemoryBackend {
     ) -> BoxFut<'a, RawTableSubgraph> {
         Box::pin(async move {
             Ok(self
-                .build_index(scope)
+                .get_or_build_index(scope)
                 .query_table_subgraph(table, dir, max_hops))
         })
     }
@@ -116,7 +152,7 @@ impl LineageBackend for MemoryBackend {
     ) -> BoxFut<'a, RawTaskSubgraph> {
         Box::pin(async move {
             Ok(self
-                .build_index(scope)
+                .get_or_build_index(scope)
                 .query_table_task_subgraph(table, dir, max_hops))
         })
     }
@@ -130,7 +166,7 @@ impl LineageBackend for MemoryBackend {
     ) -> BoxFut<'a, RawTaskSubgraph> {
         Box::pin(async move {
             Ok(self
-                .build_index(scope)
+                .get_or_build_index(scope)
                 .query_task_subgraph(job_name, dir, max_hops))
         })
     }
@@ -145,7 +181,7 @@ impl LineageBackend for MemoryBackend {
     ) -> BoxFut<'a, RawColumnSubgraph> {
         Box::pin(async move {
             Ok(self
-                .build_index(scope)
+                .get_or_build_index(scope)
                 .query_column_subgraph(full_table, column, dir, max_hops))
         })
     }
