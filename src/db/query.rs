@@ -179,6 +179,7 @@ pub struct LineageService {
     backend: Arc<dyn LineageBackend>,
     hot_index: Option<RwLock<HotGraphIndex>>,
     last_sync_ms: AtomicI64,
+    sync_mutex: tokio::sync::Mutex<()>,
 }
 
 impl LineageService {
@@ -216,6 +217,7 @@ impl LineageService {
             backend,
             hot_index,
             last_sync_ms: AtomicI64::new(now_ms()),
+            sync_mutex: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -240,16 +242,19 @@ impl LineageService {
             return Ok(());
         };
         let cur = now_ms();
-        let last = self.last_sync_ms.load(Ordering::Relaxed);
-        if cur - last < SYNC_INTERVAL_MS {
+        if cur - self.last_sync_ms.load(Ordering::Relaxed) < SYNC_INTERVAL_MS {
             return Ok(());
         }
-        self.last_sync_ms.store(cur, Ordering::Relaxed);
+        let _sync_guard = self.sync_mutex.lock().await;
+        if now_ms() - self.last_sync_ms.load(Ordering::Relaxed) < SYNC_INTERVAL_MS {
+            return Ok(());
+        }
         let watermark = lock.read().await.watermark_batch_id();
         let delta = self.backend.fetch_batches_since(watermark).await?;
         if !delta.is_empty() {
             lock.write().await.apply_batches(&delta);
         }
+        self.last_sync_ms.store(now_ms(), Ordering::Relaxed);
         Ok(())
     }
 
@@ -583,6 +588,7 @@ fn extract_directed_chains(nodes: &[String], edges: &[(String, String)]) -> Vec<
     let mut chains: Vec<Vec<String>> = Vec::new();
     let mut path: Vec<String> = Vec::new();
     let mut on_path: HashSet<String> = HashSet::default();
+    let mut ever_visited: HashSet<String> = HashSet::default();
 
     #[allow(clippy::too_many_arguments)]
     fn dfs(
@@ -590,6 +596,7 @@ fn extract_directed_chains(nodes: &[String], edges: &[(String, String)]) -> Vec<
         out_adj: &HashMap<&str, Vec<&str>>,
         path: &mut Vec<String>,
         on_path: &mut HashSet<String>,
+        ever_visited: &mut HashSet<String>,
         chains: &mut Vec<Vec<String>>,
     ) {
         if chains.len() >= MAX_CHAINS {
@@ -597,6 +604,7 @@ fn extract_directed_chains(nodes: &[String], edges: &[(String, String)]) -> Vec<
         }
         path.push(cur.to_string());
         on_path.insert(cur.to_string());
+        ever_visited.insert(cur.to_string());
 
         let mut extended = false;
         if path.len() < MAX_CHAIN_LEN {
@@ -604,7 +612,7 @@ fn extract_directed_chains(nodes: &[String], edges: &[(String, String)]) -> Vec<
                 for &nxt in nxts {
                     if !on_path.contains(nxt) {
                         extended = true;
-                        dfs(nxt, out_adj, path, on_path, chains);
+                        dfs(nxt, out_adj, path, on_path, ever_visited, chains);
                         if chains.len() >= MAX_CHAINS {
                             break;
                         }
@@ -621,9 +629,35 @@ fn extract_directed_chains(nodes: &[String], edges: &[(String, String)]) -> Vec<
     }
 
     for r in roots {
-        dfs(r, &out_adj, &mut path, &mut on_path, &mut chains);
+        dfs(
+            r,
+            &out_adj,
+            &mut path,
+            &mut on_path,
+            &mut ever_visited,
+            &mut chains,
+        );
         if chains.len() >= MAX_CHAINS {
             break;
+        }
+    }
+    if chains.len() < MAX_CHAINS {
+        let mut sorted_nodes: Vec<&str> = nodes.iter().map(String::as_str).collect();
+        sorted_nodes.sort_unstable();
+        for n in sorted_nodes {
+            if !ever_visited.contains(n) && out_adj.contains_key(n) {
+                dfs(
+                    n,
+                    &out_adj,
+                    &mut path,
+                    &mut on_path,
+                    &mut ever_visited,
+                    &mut chains,
+                );
+                if chains.len() >= MAX_CHAINS {
+                    break;
+                }
+            }
         }
     }
     chains

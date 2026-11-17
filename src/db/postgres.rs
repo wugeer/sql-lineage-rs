@@ -646,7 +646,8 @@ impl LineageBackend for PgBackend {
             let shallow = max_hops > 0 && max_hops <= SHALLOW_HOP_THRESHOLD;
             let hop_i32 = cap as i32;
 
-            let mut all_edges: Vec<(String, String, String, String)> = Vec::new();
+            let mut up_edges: Vec<(String, String, String, String)> = Vec::new();
+            let mut down_edges: Vec<(String, String, String, String)> = Vec::new();
             let mut seen_e: HashSet<(String, String, String)> = HashSet::default();
             let mut up_adj: HashMap<String, Vec<String>> = HashMap::default();
             let mut down_adj: HashMap<String, Vec<String>> = HashMap::default();
@@ -702,7 +703,7 @@ impl LineageBackend for PgBackend {
                     let j: String = r.get(2);
                     let p: String = r.get(3);
                     up_adj.entry(d.clone()).or_default().push(s.clone());
-                    all_edges.push((s, d, j, p));
+                    up_edges.push((s, d, j, p));
                 }
             }
 
@@ -757,7 +758,7 @@ impl LineageBackend for PgBackend {
                     let j: String = r.get(2);
                     let p: String = r.get(3);
                     down_adj.entry(s.clone()).or_default().push(d.clone());
-                    all_edges.push((s, d, j, p));
+                    down_edges.push((s, d, j, p));
                 }
             }
 
@@ -771,14 +772,25 @@ impl LineageBackend for PgBackend {
             valid_nodes.extend(up_dist.keys().cloned());
             valid_nodes.extend(down_dist.keys().cloned());
 
-            let filtered_edges: Vec<(String, String, String, String)> = all_edges
-                .into_iter()
-                .filter(|(s, d, j, _)| {
-                    valid_nodes.contains(s)
-                        && valid_nodes.contains(d)
-                        && seen_e.insert((s.clone(), d.clone(), j.clone()))
-                })
-                .collect();
+            let mut filtered_edges: Vec<(String, String, String, String)> = Vec::new();
+            for (s, d, j, p) in up_edges {
+                let d_ok = d == table || up_dist.get(&d).copied().unwrap_or(u32::MAX) < cap;
+                if up_dist.contains_key(&s)
+                    && d_ok
+                    && seen_e.insert((s.clone(), d.clone(), j.clone()))
+                {
+                    filtered_edges.push((s, d, j, p));
+                }
+            }
+            for (s, d, j, p) in down_edges {
+                let s_ok = s == table || down_dist.get(&s).copied().unwrap_or(u32::MAX) < cap;
+                if s_ok
+                    && down_dist.contains_key(&d)
+                    && seen_e.insert((s.clone(), d.clone(), j.clone()))
+                {
+                    filtered_edges.push((s, d, j, p));
+                }
+            }
 
             let tbl_vec: Vec<String> = valid_nodes.into_iter().collect();
             let jt_sql = format!(
@@ -911,6 +923,10 @@ impl LineageBackend for PgBackend {
             let mut raw_edges: Vec<ColumnEdgeRow> = Vec::new();
             let mut up_adj: HashMap<(String, String), Vec<(String, String)>> = HashMap::default();
             let mut down_adj: HashMap<(String, String), Vec<(String, String)>> = HashMap::default();
+            let mut up_star_sources: HashSet<String> = HashSet::default();
+            let mut down_star_targets: HashSet<String> = HashSet::default();
+            let mut up_rows_buf: Vec<ColumnEdgeRow> = Vec::new();
+            let mut down_rows_buf: Vec<ColumnEdgeRow> = Vec::new();
 
             if dir.want_up() {
                 let sql = format!(
@@ -952,13 +968,25 @@ impl LineageBackend for PgBackend {
                         edge_kind: r.get(10),
                         stmt_indices: serde_json::from_str(&sj).unwrap_or_default(),
                     };
+                    if ce.source_column == "*" {
+                        up_star_sources.insert(ce.source_full_name.clone());
+                    }
                     up_adj
                         .entry((ce.target_full_name.clone(), ce.target_column.clone()))
                         .or_default()
                         .push((ce.source_full_name.clone(), ce.source_column.clone()));
-                    if ce.target_column == "*" {
+                    if ce.target_column == "*" && ce.target_full_name == full_table {
                         up_adj
                             .entry((ce.target_full_name.clone(), column.to_string()))
+                            .or_default()
+                            .push((ce.source_full_name.clone(), ce.source_column.clone()));
+                    }
+                    up_rows_buf.push(ce);
+                }
+                for ce in up_rows_buf {
+                    if up_star_sources.contains(&ce.target_full_name) {
+                        up_adj
+                            .entry((ce.target_full_name.clone(), "*".to_string()))
                             .or_default()
                             .push((ce.source_full_name.clone(), ce.source_column.clone()));
                     }
@@ -1006,13 +1034,25 @@ impl LineageBackend for PgBackend {
                         edge_kind: r.get(10),
                         stmt_indices: serde_json::from_str(&sj).unwrap_or_default(),
                     };
+                    if ce.target_column == "*" {
+                        down_star_targets.insert(ce.target_full_name.clone());
+                    }
                     down_adj
                         .entry((ce.source_full_name.clone(), ce.source_column.clone()))
                         .or_default()
                         .push((ce.target_full_name.clone(), ce.target_column.clone()));
-                    if ce.source_column == "*" {
+                    if ce.source_column == "*" && ce.source_full_name == full_table {
                         down_adj
                             .entry((ce.source_full_name.clone(), column.to_string()))
+                            .or_default()
+                            .push((ce.target_full_name.clone(), ce.target_column.clone()));
+                    }
+                    down_rows_buf.push(ce);
+                }
+                for ce in down_rows_buf {
+                    if down_star_targets.contains(&ce.source_full_name) {
+                        down_adj
+                            .entry((ce.source_full_name.clone(), "*".to_string()))
                             .or_default()
                             .push((ce.target_full_name.clone(), ce.target_column.clone()));
                     }

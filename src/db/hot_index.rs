@@ -101,6 +101,7 @@ struct JobEntry {
 struct TblEdgeRef {
     peer_tbl: u32,
     job_id: u32,
+    batch_idx: u32,
     edge_idx: u32,
 }
 
@@ -109,6 +110,7 @@ struct ColEdgeRef {
     peer_tbl: u32,
     peer_col: u32,
     job_id: u32,
+    batch_idx: u32,
     edge_idx: u32,
 }
 
@@ -128,6 +130,8 @@ pub struct HotGraphIndex {
     tbl_job_refs: HashMap<u32, Vec<(u32, usize, usize)>>,
     col_in: HashMap<(u32, u32), Vec<ColEdgeRef>>,
     col_out: HashMap<(u32, u32), Vec<ColEdgeRef>>,
+    tbl_col_in_cols: HashMap<u32, Vec<u32>>,
+    tbl_col_out_cols: HashMap<u32, Vec<u32>>,
 }
 
 impl Default for HotGraphIndex {
@@ -152,6 +156,8 @@ impl HotGraphIndex {
             tbl_job_refs: HashMap::default(),
             col_in: HashMap::default(),
             col_out: HashMap::default(),
+            tbl_col_in_cols: HashMap::default(),
+            tbl_col_out_cols: HashMap::default(),
         }
     }
 
@@ -165,12 +171,12 @@ impl HotGraphIndex {
         self.watermark_batch_id
     }
 
-    /// 增量合并一批新入库 `BatchPayload`，若发生变更则重建紧凑邻接索引
+    /// 增量合并一批新入库 `BatchPayload`，仅对发生变更的 `job_id` 局部更新邻接索引
     pub fn apply_batches(&mut self, batches: &[BatchPayload]) -> bool {
         if batches.is_empty() {
             return false;
         }
-        let mut changed = false;
+        let mut dirty_jobs: HashSet<u32> = HashSet::default();
         for bp in batches {
             if bp.batch.batch_id > self.watermark_batch_id {
                 self.watermark_batch_id = bp.batch.batch_id;
@@ -178,31 +184,36 @@ impl HotGraphIndex {
             let job_id = self.job_syms.intern(&bp.batch.job_name);
             if !self.keep_all_history {
                 if let Some(existing) = self.jobs.get(&job_id).and_then(|v| v.first()) {
-                    if existing.batch_id > bp.batch.batch_id {
-                        continue;
-                    }
-                    if existing.batch_id == bp.batch.batch_id {
+                    if existing.batch_id >= bp.batch.batch_id {
                         continue;
                     }
                 }
+            } else if let Some(slot) = self.jobs.get(&job_id) {
+                if slot.iter().any(|x| x.batch_id == bp.batch.batch_id) {
+                    continue;
+                }
+            }
+            if dirty_jobs.insert(job_id) && self.jobs.contains_key(&job_id) {
+                self.remove_job_adjacency(job_id);
             }
             let entry = self.compact_payload(bp);
             if self.keep_all_history {
                 let slot = self.jobs.entry(job_id).or_default();
-                if slot.iter().all(|x| x.batch_id != entry.batch_id) {
-                    slot.push(entry);
-                    slot.sort_by_key(|x| x.batch_id);
-                    changed = true;
-                }
+                slot.push(entry);
+                slot.sort_by_key(|x| x.batch_id);
             } else {
                 self.jobs.insert(job_id, vec![entry]);
-                changed = true;
             }
         }
-        if changed {
-            self.rebuild_adjacency();
+        if dirty_jobs.is_empty() {
+            return false;
         }
-        changed
+        let mut sorted: Vec<u32> = dirty_jobs.into_iter().collect();
+        sorted.sort_unstable();
+        for jid in sorted {
+            self.add_job_adjacency(jid);
+        }
+        true
     }
 
     fn compact_payload(&mut self, bp: &BatchPayload) -> JobEntry {
@@ -251,79 +262,141 @@ impl HotGraphIndex {
         }
     }
 
-    fn rebuild_adjacency(&mut self) {
-        self.tbl_up.clear();
-        self.tbl_down.clear();
-        self.tbl_writers.clear();
-        self.tbl_readers.clear();
-        self.tbl_job_refs.clear();
-        self.col_in.clear();
-        self.col_out.clear();
+    fn remove_job_adjacency(&mut self, jid: u32) {
+        let Some(batches) = self.jobs.get(&jid) else {
+            return;
+        };
+        let mut touched_tbls: HashSet<u32> = HashSet::default();
+        let mut touched_up: HashSet<u32> = HashSet::default();
+        let mut touched_down: HashSet<u32> = HashSet::default();
+        let mut touched_cin: HashSet<(u32, u32)> = HashSet::default();
+        let mut touched_cout: HashSet<(u32, u32)> = HashSet::default();
+        for je in batches {
+            for jt in &je.tables {
+                touched_tbls.insert(jt.tbl_id);
+            }
+            for te in &je.table_edges {
+                touched_up.insert(te.dst_tbl);
+                touched_down.insert(te.src_tbl);
+            }
+            for ce in &je.col_edges {
+                touched_cin.insert((ce.dst_tbl, ce.dst_col));
+                touched_cout.insert((ce.src_tbl, ce.src_col));
+            }
+        }
+        for tid in touched_tbls {
+            if let Some(v) = self.tbl_job_refs.get_mut(&tid) {
+                v.retain(|&(j, _, _)| j != jid);
+                if v.is_empty() {
+                    self.tbl_job_refs.remove(&tid);
+                }
+            }
+            if let Some(w) = self.tbl_writers.get_mut(&tid) {
+                w.retain(|&j| j != jid);
+                if w.is_empty() {
+                    self.tbl_writers.remove(&tid);
+                }
+            }
+            if let Some(r) = self.tbl_readers.get_mut(&tid) {
+                r.retain(|&j| j != jid);
+                if r.is_empty() {
+                    self.tbl_readers.remove(&tid);
+                }
+            }
+        }
+        for tid in touched_up {
+            if let Some(v) = self.tbl_up.get_mut(&tid) {
+                v.retain(|e| e.job_id != jid);
+            }
+        }
+        for tid in touched_down {
+            if let Some(v) = self.tbl_down.get_mut(&tid) {
+                v.retain(|e| e.job_id != jid);
+            }
+        }
+        for k in touched_cin {
+            if let Some(v) = self.col_in.get_mut(&k) {
+                v.retain(|e| e.job_id != jid);
+            }
+        }
+        for k in touched_cout {
+            if let Some(v) = self.col_out.get_mut(&k) {
+                v.retain(|e| e.job_id != jid);
+            }
+        }
+    }
 
-        let mut job_ids: Vec<u32> = self.jobs.keys().copied().collect();
-        job_ids.sort_unstable();
-
-        for jid in job_ids {
-            let Some(batches) = self.jobs.get(&jid) else {
-                continue;
-            };
-            for (bi, je) in batches.iter().enumerate() {
-                for (ti, jt) in je.tables.iter().enumerate() {
-                    self.tbl_job_refs
-                        .entry(jt.tbl_id)
-                        .or_default()
-                        .push((jid, bi, ti));
-                    if jt.table_kind != "temp" && jt.table_kind != "result" {
-                        if jt.is_target {
-                            let w = self.tbl_writers.entry(jt.tbl_id).or_default();
-                            if !w.contains(&jid) {
-                                w.push(jid);
-                            }
+    fn add_job_adjacency(&mut self, jid: u32) {
+        let Some(batches) = self.jobs.get(&jid) else {
+            return;
+        };
+        for (bi, je) in batches.iter().enumerate() {
+            for (ti, jt) in je.tables.iter().enumerate() {
+                self.tbl_job_refs
+                    .entry(jt.tbl_id)
+                    .or_default()
+                    .push((jid, bi, ti));
+                if jt.table_kind != "temp" && jt.table_kind != "result" {
+                    if jt.is_target {
+                        let w = self.tbl_writers.entry(jt.tbl_id).or_default();
+                        if !w.contains(&jid) {
+                            w.push(jid);
                         }
-                        if jt.is_source {
-                            let r = self.tbl_readers.entry(jt.tbl_id).or_default();
-                            if !r.contains(&jid) {
-                                r.push(jid);
-                            }
+                    }
+                    if jt.is_source {
+                        let r = self.tbl_readers.entry(jt.tbl_id).or_default();
+                        if !r.contains(&jid) {
+                            r.push(jid);
                         }
                     }
                 }
-                for (ei, te) in je.table_edges.iter().enumerate() {
-                    let encoded_idx = ((bi as u32) << 20) | (ei as u32 & 0xFFFFF);
-                    self.tbl_up.entry(te.dst_tbl).or_default().push(TblEdgeRef {
-                        peer_tbl: te.src_tbl,
+            }
+            for (ei, te) in je.table_edges.iter().enumerate() {
+                let er_up = TblEdgeRef {
+                    peer_tbl: te.src_tbl,
+                    job_id: jid,
+                    batch_idx: bi as u32,
+                    edge_idx: ei as u32,
+                };
+                self.tbl_up.entry(te.dst_tbl).or_default().push(er_up);
+                self.tbl_down
+                    .entry(te.src_tbl)
+                    .or_default()
+                    .push(TblEdgeRef {
+                        peer_tbl: te.dst_tbl,
                         job_id: jid,
-                        edge_idx: encoded_idx,
+                        batch_idx: bi as u32,
+                        edge_idx: ei as u32,
                     });
-                    self.tbl_down
-                        .entry(te.src_tbl)
-                        .or_default()
-                        .push(TblEdgeRef {
-                            peer_tbl: te.dst_tbl,
-                            job_id: jid,
-                            edge_idx: encoded_idx,
-                        });
+            }
+            for (ci, ce) in je.col_edges.iter().enumerate() {
+                self.col_in
+                    .entry((ce.dst_tbl, ce.dst_col))
+                    .or_default()
+                    .push(ColEdgeRef {
+                        peer_tbl: ce.src_tbl,
+                        peer_col: ce.src_col,
+                        job_id: jid,
+                        batch_idx: bi as u32,
+                        edge_idx: ci as u32,
+                    });
+                let cin_cols = self.tbl_col_in_cols.entry(ce.dst_tbl).or_default();
+                if !cin_cols.contains(&ce.dst_col) {
+                    cin_cols.push(ce.dst_col);
                 }
-                for (ci, ce) in je.col_edges.iter().enumerate() {
-                    let encoded_idx = ((bi as u32) << 20) | (ci as u32 & 0xFFFFF);
-                    self.col_in
-                        .entry((ce.dst_tbl, ce.dst_col))
-                        .or_default()
-                        .push(ColEdgeRef {
-                            peer_tbl: ce.src_tbl,
-                            peer_col: ce.src_col,
-                            job_id: jid,
-                            edge_idx: encoded_idx,
-                        });
-                    self.col_out
-                        .entry((ce.src_tbl, ce.src_col))
-                        .or_default()
-                        .push(ColEdgeRef {
-                            peer_tbl: ce.dst_tbl,
-                            peer_col: ce.dst_col,
-                            job_id: jid,
-                            edge_idx: encoded_idx,
-                        });
+                self.col_out
+                    .entry((ce.src_tbl, ce.src_col))
+                    .or_default()
+                    .push(ColEdgeRef {
+                        peer_tbl: ce.dst_tbl,
+                        peer_col: ce.dst_col,
+                        job_id: jid,
+                        batch_idx: bi as u32,
+                        edge_idx: ci as u32,
+                    });
+                let cout_cols = self.tbl_col_out_cols.entry(ce.src_tbl).or_default();
+                if !cout_cols.contains(&ce.src_col) {
+                    cout_cols.push(ce.src_col);
                 }
             }
         }
@@ -390,38 +463,50 @@ impl HotGraphIndex {
     pub fn search_jobs(&self, keyword: &str, limit: usize) -> Vec<JobSearchItem> {
         let kw = keyword.trim().to_lowercase();
         let cap = limit.clamp(1, 500);
-        let mut items: Vec<JobSearchItem> = self
+        let mut matched: Vec<(i64, &str, u32)> = self
             .jobs
-            .keys()
-            .filter_map(|&jid| {
+            .iter()
+            .filter_map(|(&jid, batches)| {
+                let latest = batches.last()?;
                 let name = self.job_syms.resolve(jid);
                 if !kw.is_empty() && !name.to_lowercase().contains(&kw) {
                     return None;
                 }
-                self.job_summary(jid)
+                Some((latest.batch_id, name, jid))
             })
             .collect();
-        items.sort_by(|a, b| {
-            b.latest_batch_id
-                .cmp(&a.latest_batch_id)
-                .then_with(|| a.job_name.cmp(&b.job_name))
-        });
-        items.truncate(cap);
-        items
+        matched.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        matched.truncate(cap);
+        matched
+            .into_iter()
+            .filter_map(|(_, _, jid)| self.job_summary(jid))
+            .collect()
     }
 
     pub fn search_tables(&self, keyword: &str, limit: usize) -> Vec<TableSearchItem> {
         let kw = keyword.trim().to_lowercase();
         let cap = limit.clamp(1, 500);
-        let mut out = Vec::new();
-        for (&tid, refs) in &self.tbl_job_refs {
-            let full = self.tbl_syms.resolve(tid);
-            if full.starts_with("result:") {
+        let mut matched: Vec<(&str, u32)> = self
+            .tbl_job_refs
+            .keys()
+            .filter_map(|&tid| {
+                let full = self.tbl_syms.resolve(tid);
+                if full.starts_with("result:") {
+                    return None;
+                }
+                if !kw.is_empty() && !full.to_lowercase().contains(&kw) {
+                    return None;
+                }
+                Some((full, tid))
+            })
+            .collect();
+        matched.sort_by(|a, b| a.0.cmp(b.0));
+        matched.truncate(cap);
+        let mut out = Vec::with_capacity(matched.len());
+        for (full, tid) in matched {
+            let Some(refs) = self.tbl_job_refs.get(&tid) else {
                 continue;
-            }
-            if !kw.is_empty() && !full.contains(&kw) {
-                continue;
-            }
+            };
             let Some(&(jid0, bi0, ti0)) = refs.first() else {
                 continue;
             };
@@ -455,8 +540,6 @@ impl HotGraphIndex {
                 consumer_jobs: consumers,
             });
         }
-        out.sort_by(|a, b| a.full_table_name.cmp(&b.full_table_name));
-        out.truncate(cap);
         out
     }
 
@@ -496,8 +579,8 @@ impl HotGraphIndex {
                         all_tbls.insert(er.peer_tbl);
                         up_dist.entry(er.peer_tbl).or_insert(d + 1);
                         if seen_edges.insert((er.peer_tbl, cur, er.job_id)) {
-                            let bi = (er.edge_idx >> 20) as usize;
-                            let ei = (er.edge_idx & 0xFFFFF) as usize;
+                            let bi = er.batch_idx as usize;
+                            let ei = er.edge_idx as usize;
                             let preview = self
                                 .jobs
                                 .get(&er.job_id)
@@ -534,8 +617,8 @@ impl HotGraphIndex {
                         all_tbls.insert(er.peer_tbl);
                         down_dist.entry(er.peer_tbl).or_insert(d + 1);
                         if seen_edges.insert((cur, er.peer_tbl, er.job_id)) {
-                            let bi = (er.edge_idx >> 20) as usize;
-                            let ei = (er.edge_idx & 0xFFFFF) as usize;
+                            let bi = er.batch_idx as usize;
+                            let ei = er.edge_idx as usize;
                             let preview = self
                                 .jobs
                                 .get(&er.job_id)
@@ -852,10 +935,10 @@ impl HotGraphIndex {
 
         let push_edge = |edges: &mut Vec<ColumnEdgeRow>,
                          seen: &mut HashSet<(u32, u32, u32, u32, u32)>,
-                         jid: u32,
-                         encoded_idx: u32| {
-            let bi = (encoded_idx >> 20) as usize;
-            let ci = (encoded_idx & 0xFFFFF) as usize;
+                         er: ColEdgeRef| {
+            let bi = er.batch_idx as usize;
+            let ci = er.edge_idx as usize;
+            let jid = er.job_id;
             let Some(je) = self.jobs.get(&jid).and_then(|v| v.get(bi)) else {
                 return;
             };
@@ -894,21 +977,33 @@ impl HotGraphIndex {
                 if d >= cap {
                     continue;
                 }
-                let mut candidates = Vec::new();
-                if let Some(v) = self.col_in.get(&(t, c)) {
-                    candidates.extend_from_slice(v);
-                }
-                if c != star_sym {
-                    if let Some(v) = self.col_in.get(&(t, star_sym)) {
-                        candidates.extend_from_slice(v);
+                if c == star_sym {
+                    if let Some(cols) = self.tbl_col_in_cols.get(&t) {
+                        for &cid in cols {
+                            if let Some(v) = self.col_in.get(&(t, cid)) {
+                                for &er in v {
+                                    all_tbls.insert(er.peer_tbl);
+                                    up_dist.entry((er.peer_tbl, er.peer_col)).or_insert(d + 1);
+                                    push_edge(&mut edges, &mut seen_edge_keys, er);
+                                    if visited.insert((er.peer_tbl, er.peer_col)) {
+                                        q.push_back((er.peer_tbl, er.peer_col, d + 1));
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
-                for er in candidates {
-                    all_tbls.insert(er.peer_tbl);
-                    up_dist.entry((er.peer_tbl, er.peer_col)).or_insert(d + 1);
-                    push_edge(&mut edges, &mut seen_edge_keys, er.job_id, er.edge_idx);
-                    if visited.insert((er.peer_tbl, er.peer_col)) {
-                        q.push_back((er.peer_tbl, er.peer_col, d + 1));
+                } else {
+                    for lookup_col in [c, star_sym] {
+                        if let Some(v) = self.col_in.get(&(t, lookup_col)) {
+                            for &er in v {
+                                all_tbls.insert(er.peer_tbl);
+                                up_dist.entry((er.peer_tbl, er.peer_col)).or_insert(d + 1);
+                                push_edge(&mut edges, &mut seen_edge_keys, er);
+                                if visited.insert((er.peer_tbl, er.peer_col)) {
+                                    q.push_back((er.peer_tbl, er.peer_col, d + 1));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -923,21 +1018,33 @@ impl HotGraphIndex {
                 if d >= cap {
                     continue;
                 }
-                let mut candidates = Vec::new();
-                if let Some(v) = self.col_out.get(&(t, c)) {
-                    candidates.extend_from_slice(v);
-                }
-                if c != star_sym {
-                    if let Some(v) = self.col_out.get(&(t, star_sym)) {
-                        candidates.extend_from_slice(v);
+                if c == star_sym {
+                    if let Some(cols) = self.tbl_col_out_cols.get(&t) {
+                        for &cid in cols {
+                            if let Some(v) = self.col_out.get(&(t, cid)) {
+                                for &er in v {
+                                    all_tbls.insert(er.peer_tbl);
+                                    down_dist.entry((er.peer_tbl, er.peer_col)).or_insert(d + 1);
+                                    push_edge(&mut edges, &mut seen_edge_keys, er);
+                                    if visited.insert((er.peer_tbl, er.peer_col)) {
+                                        q.push_back((er.peer_tbl, er.peer_col, d + 1));
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
-                for er in candidates {
-                    all_tbls.insert(er.peer_tbl);
-                    down_dist.entry((er.peer_tbl, er.peer_col)).or_insert(d + 1);
-                    push_edge(&mut edges, &mut seen_edge_keys, er.job_id, er.edge_idx);
-                    if visited.insert((er.peer_tbl, er.peer_col)) {
-                        q.push_back((er.peer_tbl, er.peer_col, d + 1));
+                } else {
+                    for lookup_col in [c, star_sym] {
+                        if let Some(v) = self.col_out.get(&(t, lookup_col)) {
+                            for &er in v {
+                                all_tbls.insert(er.peer_tbl);
+                                down_dist.entry((er.peer_tbl, er.peer_col)).or_insert(d + 1);
+                                push_edge(&mut edges, &mut seen_edge_keys, er);
+                                if visited.insert((er.peer_tbl, er.peer_col)) {
+                                    q.push_back((er.peer_tbl, er.peer_col, d + 1));
+                                }
+                            }
+                        }
                     }
                 }
             }

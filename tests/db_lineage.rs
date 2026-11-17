@@ -623,3 +623,84 @@ async fn ddl_and_url_mask() {
     let masked2 = mask_db_url("host=127.0.0.1 port=5432 user=u password=p@ss dbname=l");
     assert!(!masked2.contains("p@ss"));
 }
+
+#[tokio::test]
+async fn temp_self_loop_and_wildcard_column_multihop() {
+    let svc = mem_service().await;
+    // 1. 经过临时表的物理自环：dwd.acc -> tmp_acc -> dwd.acc
+    save(
+        &svc,
+        "etl.self_tmp",
+        "CREATE TEMPORARY TABLE tmp_acc AS SELECT id, amt FROM dwd.acc;\n\
+         INSERT OVERWRITE TABLE dwd.acc SELECT id, amt FROM tmp_acc;",
+    )
+    .await;
+    let tbl_res = svc
+        .query_table_lineage(
+            "dwd.acc",
+            LineageDirection::Both,
+            5,
+            QueryScope::LatestBatch,
+        )
+        .await
+        .unwrap();
+    assert!(tbl_res
+        .edges
+        .iter()
+        .any(|e| e.source == "dwd.acc" && e.target == "dwd.acc"));
+
+    // 2. 通配列 `*` 多跳穿透：ods.raw.price -> dwd.mid.p -> ads.rpt.*
+    save(
+        &svc,
+        "etl.star_step1",
+        "INSERT INTO dwd.mid SELECT price AS p FROM ods.raw;",
+    )
+    .await;
+    save(
+        &svc,
+        "etl.star_step2",
+        "INSERT INTO ads.rpt SELECT * FROM dwd.mid;",
+    )
+    .await;
+    save(
+        &svc,
+        "etl.star_step3",
+        "INSERT INTO ads.final SELECT p AS out_p FROM ads.rpt;",
+    )
+    .await;
+
+    // 从末端反查到 ods.raw.price，且从起点顺查到 ads.final.out_p
+    let up = svc
+        .query_column_lineage(
+            None,
+            None,
+            None,
+            Some("ads.final.out_p"),
+            LineageDirection::Upstream,
+            0,
+            QueryScope::LatestBatch,
+        )
+        .await
+        .unwrap();
+    assert!(up
+        .upstream_columns
+        .iter()
+        .any(|c| c.qualified_column == "ods.raw.price"));
+
+    let dn = svc
+        .query_column_lineage(
+            None,
+            None,
+            None,
+            Some("ods.raw.price"),
+            LineageDirection::Downstream,
+            0,
+            QueryScope::LatestBatch,
+        )
+        .await
+        .unwrap();
+    assert!(dn
+        .downstream_columns
+        .iter()
+        .any(|c| c.qualified_column == "ads.final.out_p"));
+}

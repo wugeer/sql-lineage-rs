@@ -151,6 +151,14 @@ fn kind_rank(k: &str) -> u8 {
     }
 }
 
+fn clamp_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        s.chars().take(max_chars).collect()
+    }
+}
+
 fn dialect_str(d: SqlDialect) -> &'static str {
     match d {
         SqlDialect::Hive => "hive",
@@ -243,11 +251,7 @@ pub fn extract_batch_payload(
                 if visited_temp.insert(nxt) {
                     q.push_back((nxt, stmts.to_vec()));
                 }
-            } else if nxt != src
-                || r.table_edges
-                    .iter()
-                    .any(|e| e.source == src && e.target == nxt)
-            {
+            } else {
                 let entry = collapsed_table_edges.entry((src, nxt)).or_default();
                 for &si in stmts {
                     if !entry.contains(&si) {
@@ -268,7 +272,7 @@ pub fn extract_batch_payload(
                     if visited_temp.insert(nxt) {
                         q.push_back((nxt, merged));
                     }
-                } else if nxt != src {
+                } else {
                     let entry = collapsed_table_edges.entry((src, nxt)).or_default();
                     for si in merged {
                         if !entry.contains(&si) {
@@ -395,11 +399,11 @@ pub fn extract_batch_payload(
             continue;
         }
         job_tables.push(JobTableRow {
-            job_name: norm_job.clone(),
+            job_name: clamp_chars(&norm_job, 255),
             batch_id,
-            db_name: db_name.clone(),
-            table_name: table_name.clone(),
-            full_table_name: full_table_name.clone(),
+            db_name: clamp_chars(db_name, 128),
+            table_name: clamp_chars(table_name, 255),
+            full_table_name: clamp_chars(full_table_name, 384),
             table_kind: t.kind.to_string(),
             is_source: eff_src[tid],
             is_target: eff_tgt[tid],
@@ -421,14 +425,14 @@ pub fn extract_batch_payload(
         }
         let sql_preview = build_sql_preview(ws, &stmts);
         table_edges.push(TableEdgeRow {
-            job_name: norm_job.clone(),
+            job_name: clamp_chars(&norm_job, 255),
             batch_id,
-            source_db: sdb.clone(),
-            source_table: stbl.clone(),
-            source_full_name: sfull.clone(),
-            target_db: tdb.clone(),
-            target_table: ttbl.clone(),
-            target_full_name: tfull.clone(),
+            source_db: clamp_chars(sdb, 128),
+            source_table: clamp_chars(stbl, 255),
+            source_full_name: clamp_chars(sfull, 384),
+            target_db: clamp_chars(tdb, 128),
+            target_table: clamp_chars(ttbl, 255),
+            target_full_name: clamp_chars(tfull, 384),
             stmt_indices: stmts,
             sql_preview,
         });
@@ -446,16 +450,16 @@ pub fn extract_batch_payload(
             continue;
         }
         column_edges.push(ColumnEdgeRow {
-            job_name: norm_job.clone(),
+            job_name: clamp_chars(&norm_job, 255),
             batch_id,
-            source_db: sdb.clone(),
-            source_table: stbl.clone(),
-            source_full_name: sfull.clone(),
-            source_column: scol,
-            target_db: tdb.clone(),
-            target_table: ttbl.clone(),
-            target_full_name: tfull.clone(),
-            target_column: dcol,
+            source_db: clamp_chars(sdb, 128),
+            source_table: clamp_chars(stbl, 255),
+            source_full_name: clamp_chars(sfull, 384),
+            source_column: clamp_chars(&scol, 255),
+            target_db: clamp_chars(tdb, 128),
+            target_table: clamp_chars(ttbl, 255),
+            target_full_name: clamp_chars(tfull, 384),
+            target_column: clamp_chars(&dcol, 255),
             edge_kind: ekind.to_string(),
             stmt_indices: stmts,
         });
@@ -465,12 +469,12 @@ pub fn extract_batch_payload(
         .unwrap_or_else(|_| "[]".to_string());
 
     let batch = BatchRow {
-        job_name: norm_job,
+        job_name: clamp_chars(&norm_job, 255),
         batch_id,
-        dag_name,
-        task_name,
+        dag_name: clamp_chars(&dag_name, 255),
+        task_name: clamp_chars(&task_name, 255),
         dialect: dialect_str(dialect).to_string(),
-        default_db: default_db.unwrap_or("").trim().to_lowercase(),
+        default_db: clamp_chars(default_db.unwrap_or("").trim(), 128).to_lowercase(),
         files_json,
         statement_count: r.stats.statements as i32,
         parsed_count: r.stats.parsed as i32,
