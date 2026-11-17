@@ -142,9 +142,34 @@ fn cli_ddl_and_query() {
 
     // memory:// 后端：四类查询子命令均可正常执行（空库返回空结果而非崩溃）
     for args in [
-        vec!["query", "table", "dw.t", "--db-url", "memory://"],
-        vec!["query", "table-tasks", "dw.t", "--db-url", "memory://"],
-        vec!["query", "task", "etl.x", "--db-url", "memory://"],
+        vec![
+            "query",
+            "table",
+            "dw.t",
+            "--db-url",
+            "memory://",
+            "--direction",
+            "upstream",
+            "--hops",
+            "0",
+        ],
+        vec![
+            "query",
+            "table-tasks",
+            "dw.t",
+            "--db-url",
+            "memory://",
+            "--all-history",
+        ],
+        vec![
+            "query",
+            "task",
+            "etl.x",
+            "--db-url",
+            "memory://",
+            "--direction",
+            "downstream",
+        ],
         vec!["query", "column", "dw.t.col", "--db-url", "memory://"],
         vec![
             "query",
@@ -169,6 +194,21 @@ fn cli_ddl_and_query() {
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains('{'), "args={args:?} stdout={stdout}");
     }
+
+    // 通过 HL_DB_URL 环境变量提供连接串
+    let out = Command::new(bin)
+        .args(["query", "table", "dw.t"])
+        .env("HL_DB_URL", "memory://")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr={:?}", out.stderr);
+
+    // query column 缺字段参数 -> 报错退出
+    let out = Command::new(bin)
+        .args(["query", "column", "--db-url", "memory://"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
 }
 
 #[test]

@@ -326,3 +326,40 @@ pub trait LineageBackend: Send + Sync {
         scope: QueryScope,
     ) -> BoxFut<'a, RawColumnSubgraph>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_types_and_direction_parse() {
+        let cfg = DbConfig::new("memory://");
+        assert_eq!(cfg.url, "memory://");
+        assert!(cfg.auto_create_table);
+        assert!(cfg.use_hot_index);
+
+        assert_eq!(
+            "".parse::<LineageDirection>().unwrap(),
+            LineageDirection::Both
+        );
+        assert_eq!(
+            "all".parse::<LineageDirection>().unwrap(),
+            LineageDirection::Both
+        );
+        assert_eq!(
+            "up".parse::<LineageDirection>().unwrap(),
+            LineageDirection::Upstream
+        );
+        assert_eq!(
+            "downstream".parse::<LineageDirection>().unwrap(),
+            LineageDirection::Downstream
+        );
+        assert!("sideways".parse::<LineageDirection>().is_err());
+
+        assert_eq!(LineageDirection::Both.as_str(), "both");
+        assert_eq!(LineageDirection::Upstream.as_str(), "upstream");
+        assert_eq!(LineageDirection::Downstream.as_str(), "downstream");
+        assert_eq!(QueryScope::from_all_history(false).as_str(), "latest_batch");
+        assert_eq!(QueryScope::from_all_history(true).as_str(), "all_history");
+    }
+}

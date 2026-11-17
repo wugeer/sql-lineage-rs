@@ -150,3 +150,49 @@ impl LineageBackend for MemoryBackend {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::extract::extract_batch_payload;
+    use crate::{analyze_with_sources, InputFile, Options, SqlDialect};
+
+    fn make_batch(job: &str, sql: &str) -> BatchPayload {
+        let ws = analyze_with_sources(
+            vec![InputFile {
+                name: "m.sql".into(),
+                bytes: sql.as_bytes().to_vec(),
+            }],
+            &Options {
+                job_name: Some(job.into()),
+                analyze_select: Some(false),
+                ..Options::default()
+            },
+        );
+        extract_batch_payload(job, SqlDialect::Hive, None, &ws).unwrap()
+    }
+
+    #[tokio::test]
+    async fn memory_snapshot_and_delta_fetch() {
+        let mem = MemoryBackend::new();
+        mem.ensure_schema().await.unwrap();
+        mem.ping().await.unwrap();
+
+        let b1 = make_batch("dag.a", "INSERT INTO dwd.t SELECT x FROM ods.s1;");
+        let b2 = make_batch("dag.a", "INSERT INTO dwd.t SELECT x FROM ods.s2;");
+        let b3 = make_batch("dag.b", "INSERT INTO dws.u SELECT x FROM dwd.t;");
+        mem.append_batch(&b1).await.unwrap();
+        mem.append_batch(&b2).await.unwrap();
+        mem.append_batch(&b3).await.unwrap();
+
+        let snap = mem.load_latest_snapshot().await.unwrap();
+        assert_eq!(snap.len(), 2);
+        assert!(snap.iter().any(|p| p.batch.batch_id == b2.batch.batch_id));
+        assert!(snap.iter().any(|p| p.batch.batch_id == b3.batch.batch_id));
+
+        let delta = mem.fetch_batches_since(b1.batch.batch_id).await.unwrap();
+        assert_eq!(delta.len(), 2);
+        assert_eq!(delta[0].batch.batch_id, b2.batch.batch_id);
+        assert_eq!(delta[1].batch.batch_id, b3.batch.batch_id);
+    }
+}

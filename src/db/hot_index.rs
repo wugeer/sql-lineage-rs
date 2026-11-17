@@ -1080,3 +1080,61 @@ impl HotGraphIndex {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::extract::extract_batch_payload;
+    use crate::{analyze_with_sources, InputFile, Options, SqlDialect};
+
+    fn batch_of(job: &str, sql: &str) -> BatchPayload {
+        let ws = analyze_with_sources(
+            vec![InputFile {
+                name: "j.sql".into(),
+                bytes: sql.as_bytes().to_vec(),
+            }],
+            &Options {
+                job_name: Some(job.into()),
+                analyze_select: Some(false),
+                ..Options::default()
+            },
+        );
+        extract_batch_payload(job, SqlDialect::Hive, None, &ws).unwrap()
+    }
+
+    #[test]
+    fn incremental_history_and_edge_cases() {
+        let mut idx = HotGraphIndex::default();
+        assert!(!idx.apply_batches(&[]));
+
+        let b1 = batch_of("dag.j1", "INSERT INTO dwd.t SELECT a FROM ods.s1;");
+        let mut b2 = batch_of("dag.j1", "INSERT INTO dwd.t SELECT a FROM ods.s2;");
+        // 相同或更旧 batch_id 被忽略
+        let mut stale = b1.clone();
+        stale.batch.batch_id = b1.batch.batch_id - 1;
+        assert!(idx.apply_batches(std::slice::from_ref(&b1)));
+        assert!(!idx.apply_batches(&[b1.clone(), stale]));
+        assert!(idx.apply_batches(std::slice::from_ref(&b2)));
+        assert_eq!(idx.watermark_batch_id(), b2.batch.batch_id);
+        let sub = idx.query_table_subgraph("dwd.t", LineageDirection::Upstream, 0);
+        assert_eq!(sub.up_distances.len(), 1);
+        assert_eq!(sub.up_distances[0].0, "ods.s2");
+
+        // 全历史模式保留多批次并去重相同 batch_id
+        b2.batch.batch_id += 1;
+        let mut hist = HotGraphIndex::from_batches(&[b1, b2.clone()], true);
+        assert!(!hist.apply_batches(&[b2]));
+        let hsub = hist.query_table_subgraph("dwd.t", LineageDirection::Both, 0);
+        assert_eq!(hsub.up_distances.len(), 2);
+        assert!(!hist.search_jobs("j1", 10).is_empty());
+        assert!(!hist.search_tables("dwd", 10).is_empty());
+        assert!(hist
+            .query_table_subgraph("no.tbl", LineageDirection::Both, 1)
+            .edges
+            .is_empty());
+        assert!(hist
+            .query_column_subgraph("dwd.t", "missing_col", LineageDirection::Both, 1)
+            .edges
+            .is_empty());
+    }
+}

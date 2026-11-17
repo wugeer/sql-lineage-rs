@@ -704,3 +704,91 @@ async fn temp_self_loop_and_wildcard_column_multihop() {
         .iter()
         .any(|c| c.qualified_column == "ads.final.out_p"));
 }
+
+#[tokio::test]
+async fn memory_backend_without_hot_index_covers_all_queries() {
+    let svc = LineageService::connect(DbConfig {
+        url: "memory://".into(),
+        auto_create_table: false,
+        use_hot_index: false,
+    })
+    .await
+    .unwrap();
+    assert!(!svc.hot_index_enabled());
+    svc.ping().await.unwrap();
+
+    // 多个任务写入同一边（触发 ">2 任务" 合并边标签）
+    for j in ["dag.j1", "dag.j2", "dag.j3"] {
+        save(&svc, j, "INSERT INTO dwd.t SELECT a FROM ods.s;").await;
+    }
+    save(&svc, "dag.j4", "INSERT INTO dws.u SELECT a FROM dwd.t;").await;
+
+    let jobs = svc
+        .search_jobs("dag", 10, QueryScope::LatestBatch)
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 4);
+    let tbls = svc
+        .search_tables("dwd", 10, QueryScope::LatestBatch)
+        .await
+        .unwrap();
+    assert!(tbls.iter().any(|t| t.full_table_name == "dwd.t"));
+
+    let t_lin = svc
+        .query_table_lineage("dwd.t", LineageDirection::Both, 5, QueryScope::LatestBatch)
+        .await
+        .unwrap();
+    assert!(t_lin.graph["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["label"].as_str().unwrap_or("").contains("等3任务")));
+
+    let tt_lin = svc
+        .query_table_task_lineage("dwd.t", LineageDirection::Both, 5, QueryScope::LatestBatch)
+        .await
+        .unwrap();
+    assert_eq!(tt_lin.producer_jobs.len(), 3);
+    assert_eq!(tt_lin.consumer_jobs, vec!["dag.j4"]);
+
+    let j_lin = svc
+        .query_task_lineage(
+            "dag.j1",
+            LineageDirection::Downstream,
+            5,
+            QueryScope::LatestBatch,
+        )
+        .await
+        .unwrap();
+    assert!(j_lin.downstream_jobs.iter().any(|j| j.job_name == "dag.j4"));
+
+    let c_lin = svc
+        .query_column_lineage(
+            Some("ods"),
+            Some("s"),
+            Some("a"),
+            None,
+            LineageDirection::Downstream,
+            5,
+            QueryScope::AllHistory,
+        )
+        .await
+        .unwrap();
+    assert!(c_lin
+        .downstream_columns
+        .iter()
+        .any(|c| c.qualified_column == "dws.u.a"));
+
+    assert!(svc
+        .query_table_lineage("   ", LineageDirection::Both, 1, QueryScope::LatestBatch)
+        .await
+        .is_err());
+    assert!(svc
+        .query_table_task_lineage("   ", LineageDirection::Both, 1, QueryScope::LatestBatch)
+        .await
+        .is_err());
+    assert!(svc
+        .query_task_lineage("   ", LineageDirection::Both, 1, QueryScope::LatestBatch)
+        .await
+        .is_err());
+}

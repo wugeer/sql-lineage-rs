@@ -575,4 +575,47 @@ mod tests {
                 && ce.edge_kind == "aggregate"
         }));
     }
+
+    #[test]
+    fn extract_edge_cases_and_multihop_temp() {
+        assert_eq!(
+            split_db_table("dir:/tmp/out"),
+            ("".into(), "dir:/tmp/out".into(), "dir:/tmp/out".into())
+        );
+        assert_eq!(split_db_table("   "), ("".into(), "".into(), "".into()));
+        assert!(parse_qualified_column(None, Some("t"), None, None).is_err());
+        assert!(parse_qualified_column(None, None, Some("c"), None).is_err());
+        assert!(parse_qualified_column(None, Some("."), Some("c"), None).is_err());
+        assert!(parse_qualified_column(None, None, None, Some("single")).is_err());
+        assert_eq!(clamp_chars("abcdef", 3), "abc");
+
+        // 多跳临时表 tmp1 -> tmp2 + 长 SQL 预览截断 + 独立查询 result 命名空间
+        let pad = "x".repeat(600);
+        let sql = format!(
+            "CREATE TEMPORARY TABLE tmp1 AS SELECT a, '{pad}' AS pad FROM ods.src;\n\
+             CREATE TEMPORARY TABLE tmp2 AS SELECT a FROM tmp1;\n\
+             INSERT INTO dwd.dst SELECT a FROM tmp2;\n\
+             SELECT a FROM ods.src;"
+        );
+        let ws = analyze_with_sources(
+            vec![InputFile {
+                name: "job.sql".into(),
+                bytes: sql.as_bytes().to_vec(),
+            }],
+            &Options {
+                job_name: Some("dag.multi_tmp".into()),
+                analyze_select: Some(true),
+                ..Options::default()
+            },
+        );
+        let p = extract_batch_payload("dag.multi_tmp", SqlDialect::Spark, None, &ws).unwrap();
+        assert_eq!(p.batch.dialect, "spark");
+        assert!(p.table_edges.iter().any(|e| e.source_full_name == "ods.src"
+            && e.target_full_name == "dwd.dst"
+            && e.sql_preview.ends_with("...")));
+        assert!(p
+            .job_tables
+            .iter()
+            .any(|t| t.full_table_name.starts_with("result:dag.multi_tmp:")));
+    }
 }

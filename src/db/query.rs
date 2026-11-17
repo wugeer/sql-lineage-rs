@@ -1730,3 +1730,71 @@ fn edge_rank(k: &str) -> u8 {
         _ => 1,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dag_levels_and_mixed_cycle_chains() {
+        assert!(compute_dag_levels(0, &[]).is_empty());
+        // 混合图：0->1 为 DAG，2->3->2 为独立纯环
+        let lv = compute_dag_levels(4, &[(0, 1), (2, 3), (3, 2)]);
+        assert_eq!(lv[0], 0);
+        assert_eq!(lv[1], 1);
+        assert_eq!(lv[2], 0);
+
+        let nodes = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        let edges = vec![
+            ("a".into(), "b".into()),
+            ("c".into(), "d".into()),
+            ("d".into(), "c".into()),
+        ];
+        let chains = extract_directed_chains(&nodes, &edges);
+        assert!(chains.iter().any(|c| c == &vec!["a", "b"]));
+        assert!(chains.iter().any(|c| c == &vec!["c", "d"]));
+        assert!(extract_directed_chains(&nodes, &[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn hot_index_watermark_sync_pulls_out_of_band_writes() {
+        use crate::db::extract::extract_batch_payload;
+        use crate::{analyze_with_sources, InputFile, Options, SqlDialect};
+
+        let backend = Arc::new(MemoryBackend::new());
+        let svc = LineageService::from_backend(DbConfig::new("memory://"), backend.clone())
+            .await
+            .unwrap();
+
+        // 绕过 save_workspace 直接写入底层后端，模拟外部进程写入
+        let ws = analyze_with_sources(
+            vec![InputFile {
+                name: "ext.sql".into(),
+                bytes: b"INSERT INTO dwd.ext SELECT k FROM ods.ext_src;".to_vec(),
+            }],
+            &Options {
+                job_name: Some("ext.job".into()),
+                analyze_select: Some(false),
+                ..Options::default()
+            },
+        );
+        let bp = extract_batch_payload("ext.job", SqlDialect::Hive, None, &ws).unwrap();
+        backend.append_batch(&bp).await.unwrap();
+
+        // 拨回同步时间戳，触发 sync_hot_index_if_needed 拉取增量
+        svc.last_sync_ms.store(0, Ordering::Relaxed);
+        let res = svc
+            .query_table_lineage(
+                "dwd.ext",
+                LineageDirection::Upstream,
+                5,
+                QueryScope::LatestBatch,
+            )
+            .await
+            .unwrap();
+        assert!(res
+            .upstream_tables
+            .iter()
+            .any(|t| t.full_table_name == "ods.ext_src"));
+    }
+}

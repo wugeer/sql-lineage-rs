@@ -83,5 +83,10 @@ mod tests {
             mask_db_url("host=127.0.0.1 user=postgres password=my_secret dbname=dw"),
             "host=127.0.0.1 user=postgres password=*** dbname=dw"
         );
+        assert_eq!(
+            mask_db_url("host=127.0.0.1 password = sp_secret passwd=p1 pwd = p2"),
+            "host=127.0.0.1 password = *** passwd=*** pwd = ***"
+        );
+        assert_eq!(mask_db_url("memory://"), "memory://");
     }
 }
