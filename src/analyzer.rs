@@ -915,7 +915,9 @@ impl Analyzer {
         if let Some(w) = &q.with {
             for cte in &w.cte_tables {
                 let key = lower_cow(&cte.alias.name.value).into_owned();
-                self.ctes.insert(key.clone(), Rc::new(RelCols::default()));
+                if w.recursive {
+                    self.ctes.insert(key.clone(), Rc::new(RelCols::default()));
+                }
                 let mut rc = self.query(&cte.query);
                 if !cte.alias.columns.is_empty() {
                     for (i, cd) in cte.alias.columns.iter().enumerate() {
@@ -1851,7 +1853,7 @@ fn expand_rel(r: &Rel, out: &mut RelCols) {
 }
 
 /// UNION 等集合操作按位置合并（名字取左分支）
-fn union_merge(mut l: RelCols, r: RelCols) -> RelCols {
+fn union_merge(mut l: RelCols, mut r: RelCols) -> RelCols {
     let n = l.cols.len().min(r.cols.len());
     for i in 0..n {
         let mut srcs = (*l.cols[i].srcs).clone();
@@ -1861,6 +1863,37 @@ fn union_merge(mut l: RelCols, r: RelCols) -> RelCols {
             }
         }
         l.cols[i].srcs = Rc::new(srcs);
+    }
+    if r.cols.len() > l.cols.len() {
+        let l_star = l
+            .cols
+            .iter()
+            .find(|c| c.name == STAR_COL)
+            .map(|c| c.srcs.clone());
+        for mut c in r.cols.drain(n..) {
+            if let Some(ref star_srcs) = l_star {
+                let mut srcs = (*c.srcs).clone();
+                for s in star_srcs.iter() {
+                    if !srcs.contains(s) {
+                        srcs.push(*s);
+                    }
+                }
+                c.srcs = Rc::new(srcs);
+            }
+            l.cols.push(c);
+        }
+    } else if l.cols.len() > r.cols.len() {
+        if let Some(r_star) = r.cols.iter().find(|c| c.name == STAR_COL) {
+            for c in &mut l.cols[n..] {
+                let mut srcs = (*c.srcs).clone();
+                for s in r_star.srcs.iter() {
+                    if !srcs.contains(s) {
+                        srcs.push(*s);
+                    }
+                }
+                c.srcs = Rc::new(srcs);
+            }
+        }
     }
     l.unknown |= r.unknown;
     l

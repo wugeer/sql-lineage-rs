@@ -476,3 +476,71 @@ fn t132_fallback_var_in_name() {
     let r = run("MERGE INTO ${db. USING dw.s ON x = y THEN BROKEN");
     assert!(r.statements.iter().any(|s| !s.status.is_empty()));
 }
+
+#[test]
+fn t133_multiline_string_line_numbers() {
+    let sql = "INSERT INTO dw.t1 SELECT 'line1\nline2\nline3' AS s FROM dw.s;\nINSERT INTO dw.t2 SELECT a FROM dw.s;";
+    let r = run(sql);
+    assert_eq!(r.statements.len(), 2);
+    assert_eq!(r.statements[0].line, 1);
+    assert_eq!(r.statements[1].line, 4);
+}
+
+#[test]
+fn t134_set_with_trailing_comment() {
+    let sql =
+        "SET hivevar:tgt = 'dw.out_tbl' -- 行尾注释\n;\nINSERT INTO ${tgt} SELECT a FROM dw.src;";
+    let r = run(sql);
+    assert_eq!(r.stats.failed, 0);
+    assert!(has_tedge(&r, "dw.src", "dw.out_tbl"));
+    assert!(has_cedge(&r, "dw.src", "a", "dw.out_tbl", "a"));
+}
+
+#[test]
+fn t135_parenthesized_ctas_preserves_column_lineage() {
+    let sql = "CREATE TABLE dw.ctas_p AS (SELECT id, amt + 1 AS amt2 FROM ods.orders);";
+    let r = run(sql);
+    assert_eq!(r.statements[0].kind, "ctas");
+    assert_eq!(r.statements[0].status, "ok");
+    assert!(has_kind(
+        &r,
+        "ods.orders",
+        "id",
+        "dw.ctas_p",
+        "id",
+        "direct"
+    ));
+    assert!(has_kind(
+        &r,
+        "ods.orders",
+        "amt",
+        "dw.ctas_p",
+        "amt2",
+        "derived"
+    ));
+}
+
+#[test]
+fn t136_non_recursive_same_name_cte_does_not_shadow_table() {
+    let sql = "WITH orders AS (SELECT id, amt FROM orders) INSERT INTO dw.out SELECT id, amt FROM orders;";
+    let r = run_opt(
+        sql,
+        Options {
+            default_db: Some("ods".into()),
+            ..Options::default()
+        },
+    );
+    assert!(has_tedge(&r, "ods.orders", "dw.out"));
+    assert!(has_cedge(&r, "ods.orders", "id", "dw.out", "id"));
+    assert!(has_cedge(&r, "ods.orders", "amt", "dw.out", "amt"));
+}
+
+#[test]
+fn t137_union_star_with_explicit_columns() {
+    let sql = "INSERT INTO dw.u(a, b) SELECT * FROM ods.unknown_tbl UNION ALL SELECT x, y FROM ods.known_tbl;";
+    let r = run(sql);
+    assert!(has_cedge(&r, "ods.known_tbl", "x", "dw.u", "a"));
+    assert!(has_cedge(&r, "ods.known_tbl", "y", "dw.u", "b"));
+    assert!(has_cedge(&r, "ods.unknown_tbl", "*", "dw.u", "a"));
+    assert!(has_cedge(&r, "ods.unknown_tbl", "*", "dw.u", "b"));
+}

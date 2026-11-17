@@ -129,6 +129,27 @@ fn skip_quoted(b: &[u8], mut i: usize, q: u8) -> usize {
     b.len()
 }
 
+/// 跳过字符串/标识符体并同步累计跨行 `\n` 行号
+fn skip_quoted_lines(b: &[u8], mut i: usize, q: u8, line: &mut usize) -> usize {
+    while i < b.len() {
+        match b[i] {
+            x if x == q => return i,
+            b'\\' => {
+                if i + 1 < b.len() && b[i + 1] == b'\n' {
+                    *line += 1;
+                }
+                i += 2;
+            }
+            b'\n' => {
+                *line += 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
 /// 将文本按顶层 `;` 切分为语句，返回（去除空白/纯注释的）语句列表
 pub fn split_statements(text: &str) -> Vec<RawStatement> {
     let b = text.as_bytes();
@@ -166,7 +187,7 @@ pub fn split_statements(text: &str) -> Vec<RawStatement> {
                 if seg_start.is_none() {
                     seg_start = Some((i, line));
                 }
-                i = skip_quoted(b, i + 1, c);
+                i = skip_quoted_lines(b, i + 1, c, &mut line);
                 if i < b.len() {
                     i += 1; // 跳过收尾引号
                 }

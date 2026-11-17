@@ -139,7 +139,8 @@ fn parse_set<'a>(text: &str, toks: &[Token]) -> Prep<'a> {
                 .or_else(|| key_raw.strip_prefix("hiveconf:"))
                 .unwrap_or(&key_raw)
                 .to_string();
-            let mut value = text[toks[e].end..].trim().to_string();
+            let val_end = toks.last().map(|t| t.end).unwrap_or(text.len());
+            let mut value = text[toks[e].end..val_end].trim().to_string();
             if value.len() >= 2 {
                 let bs = value.as_bytes();
                 if (bs[0] == b'\'' && bs[value.len() - 1] == b'\'')
@@ -304,7 +305,21 @@ pub fn classify<'a>(sub: Cow<'a, str>) -> Prep<'a> {
             ""
         };
         if obj.eq_ignore_ascii_case("table") {
-            let is_ctas = first_top_kw(&sub, &toks, &ds, i + 1, &["select", "with"]).is_some();
+            let paren_ctas = first_top_kw(&sub, &toks, &ds, i + 1, &["as"])
+                .map(|as_i| {
+                    let mut k = as_i + 1;
+                    while k < toks.len() && toks[k].is_sym(&sub, b'(') {
+                        k += 1;
+                    }
+                    k > as_i + 1
+                        && k < toks.len()
+                        && (toks[k].is_kw(&sub, "select")
+                            || toks[k].is_kw(&sub, "with")
+                            || toks[k].is_kw(&sub, "values"))
+                })
+                .unwrap_or(false);
+            let is_ctas =
+                first_top_kw(&sub, &toks, &ds, i + 1, &["select", "with"]).is_some() || paren_ctas;
             if is_ctas {
                 return Prep::Parse {
                     kind: "ctas",
