@@ -79,8 +79,9 @@ impl SessionGraph {
         while let Some(u) = queue.pop_front() {
             processed[u as usize] = true;
             for &v in &down[u as usize] {
-                if levels[v as usize] < levels[u as usize] + 1 {
-                    levels[v as usize] = levels[u as usize] + 1;
+                let next_lvl = levels[u as usize] + 1;
+                if levels[v as usize] == u32::MAX || levels[v as usize] < next_lvl {
+                    levels[v as usize] = next_lvl;
                 }
                 indeg[v as usize] = indeg[v as usize].saturating_sub(1);
                 if indeg[v as usize] == 0 {

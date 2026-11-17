@@ -1466,8 +1466,13 @@ fn build_column_lineage_response(
     let mut down_job_map: HashMap<String, ColumnJobOut> = HashMap::default();
     for ce in &edges_out {
         let sk = (ce.source_table.as_str(), ce.source_column.as_str());
+        let sk_star = (ce.source_table.as_str(), "*");
         let tk = (ce.target_table.as_str(), ce.target_column.as_str());
-        if let (Some(_), Some(&td)) = (up_dist_map.get(&sk), up_dist_map.get(&tk)) {
+        let tk_star = (ce.target_table.as_str(), "*");
+        if let (Some(_), Some(&td)) = (
+            up_dist_map.get(&sk).or_else(|| up_dist_map.get(&sk_star)),
+            up_dist_map.get(&tk).or_else(|| up_dist_map.get(&tk_star)),
+        ) {
             for jn in &ce.jobs {
                 let (_, dag, task) = split_job_name(jn).unwrap_or_default();
                 let entry = up_job_map
@@ -1493,7 +1498,14 @@ fn build_column_lineage_response(
                 }
             }
         }
-        if let (Some(&sd), Some(_)) = (down_dist_map.get(&sk), down_dist_map.get(&tk)) {
+        if let (Some(&sd), Some(_)) = (
+            down_dist_map
+                .get(&sk)
+                .or_else(|| down_dist_map.get(&sk_star)),
+            down_dist_map
+                .get(&tk)
+                .or_else(|| down_dist_map.get(&tk_star)),
+        ) {
             for jn in &ce.jobs {
                 let (_, dag, task) = split_job_name(jn).unwrap_or_default();
                 let entry = down_job_map
