@@ -373,6 +373,23 @@ async fn memory_backend_column_lineage() {
         .downstream_columns
         .iter()
         .any(|c| c.qualified_column == "dws.daily.gmv"));
+    // 通过字段查询关联表与关联任务血缘
+    assert!(res
+        .upstream_tables
+        .iter()
+        .any(|t| t.full_table_name == "ods.orders" && t.distance == 1 && t.columns == vec!["amt"]));
+    assert!(res
+        .downstream_tables
+        .iter()
+        .any(|t| t.full_table_name == "dws.daily" && t.distance == 1 && t.columns == vec!["gmv"]));
+    assert!(res
+        .upstream_jobs
+        .iter()
+        .any(|j| j.job_name == "etl.dwd_build" && j.distance == 1));
+    assert!(res
+        .downstream_jobs
+        .iter()
+        .any(|j| j.job_name == "etl.dws_agg" && j.distance == 1));
     // sum() 聚合应标记为 aggregate
     let gmv_edge = res.edges.iter().find(|e| e.target_column == "gmv").unwrap();
     assert_eq!(gmv_edge.kind, "aggregate");

@@ -748,11 +748,21 @@ function renderTaskQuerySummary(d){
 }
 
 function renderColumnQuerySummary(d){
-  let h=`<div class="qsec-title">目标字段：${esc(d.query_column)}</div>`;
+  const upTbls=d.upstream_tables||[],dnTbls=d.downstream_tables||[];
+  const upJobs=d.upstream_jobs||[],dnJobs=d.downstream_jobs||[];
+  let h=`<div class="qsec-title"><span>目标字段：${esc(d.query_column)}</span><a href="#" data-jtbl="${esc(d.full_table_name)}" style="font-size:11px;color:var(--acc)">看所属表</a></div>`;
   h+=`<div class="qsec-title">上游 库名.表名.字段名 (${d.upstream_columns.length})</div><div class="mini-list">`;
   h+=d.upstream_columns.map(c=>`<span class="mini-t" data-jcol="${esc(c.full_table_name)}|${esc(c.column_name)}">${esc(c.qualified_column)} <small style="opacity:.65">-${c.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无上游字段</span>`;
   h+=`</div><div class="qsec-title">下游 库名.表名.字段名 (${d.downstream_columns.length})</div><div class="mini-list">`;
   h+=d.downstream_columns.map(c=>`<span class="mini-t" data-jcol="${esc(c.full_table_name)}|${esc(c.column_name)}">${esc(c.qualified_column)} <small style="opacity:.65">+${c.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无下游字段</span>`;
+  h+=`</div><div class="qsec-title">关联上游表 (${upTbls.length})</div><div class="mini-list">`;
+  h+=upTbls.map(t=>`<span class="mini-t" data-jtbl="${esc(t.full_table_name)}">${esc(t.full_table_name)} <small style="opacity:.65">-${t.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无关联上游表</span>`;
+  h+=`</div><div class="qsec-title">关联下游表 (${dnTbls.length})</div><div class="mini-list">`;
+  h+=dnTbls.map(t=>`<span class="mini-t" data-jtbl="${esc(t.full_table_name)}">${esc(t.full_table_name)} <small style="opacity:.65">+${t.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无关联下游表</span>`;
+  h+=`</div><div class="qsec-title">关联上游任务 (${upJobs.length})</div><div class="mini-list">`;
+  h+=upJobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j.job_name)}">${esc(j.job_name)} <small style="opacity:.65">-${j.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无上游加工任务</span>`;
+  h+=`</div><div class="qsec-title">关联下游任务 (${dnJobs.length})</div><div class="mini-list">`;
+  h+=dnJobs.map(j=>`<span class="mini-t job-pill" data-jjob="${esc(j.job_name)}">${esc(j.job_name)} <small style="opacity:.65">+${j.distance}跳</small></span>`).join("")||`<span style="color:var(--ink2);font-size:11px">无下游加工任务</span>`;
   h+=`</div>`;
   if(d.chains&&d.chains.length){
     h+=`<div class="qsec-title">字段血缘完整链路 (${d.chains.length})</div>`;

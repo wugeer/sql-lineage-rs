@@ -132,6 +132,26 @@ pub struct ColumnEdgeOut {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ColumnTableOut {
+    pub full_table_name: String,
+    pub db_name: String,
+    pub table_name: String,
+    pub distance: u32,
+    pub columns: Vec<String>,
+    pub jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnJobOut {
+    pub job_name: String,
+    pub dag_name: String,
+    pub task_name: String,
+    pub distance: u32,
+    pub via_tables: Vec<String>,
+    pub via_columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ColumnLineageResponse {
     /// `库名.表名.字段名`
     pub query_column: String,
@@ -144,6 +164,10 @@ pub struct ColumnLineageResponse {
     pub hops: u32,
     pub upstream_columns: Vec<ColumnNodeOut>,
     pub downstream_columns: Vec<ColumnNodeOut>,
+    pub upstream_tables: Vec<ColumnTableOut>,
+    pub downstream_tables: Vec<ColumnTableOut>,
+    pub upstream_jobs: Vec<ColumnJobOut>,
+    pub downstream_jobs: Vec<ColumnJobOut>,
     pub edges: Vec<ColumnEdgeOut>,
     /// 完整字段级血缘路径（每项为 `["ods.a.x", "dwd.b.x", "dws.c.y"]`）
     pub chains: Vec<Vec<String>>,
@@ -1353,6 +1377,131 @@ fn build_column_lineage_response(
             .then_with(|| a.target.cmp(&b.target))
     });
 
+    let aggregate_col_tables = |cols: &[ColumnNodeOut]| -> Vec<ColumnTableOut> {
+        let mut tmap: HashMap<String, ColumnTableOut> = HashMap::default();
+        for c in cols {
+            let entry = tmap
+                .entry(c.full_table_name.clone())
+                .or_insert_with(|| ColumnTableOut {
+                    full_table_name: c.full_table_name.clone(),
+                    db_name: c.db_name.clone(),
+                    table_name: c.table_name.clone(),
+                    distance: c.distance,
+                    columns: Vec::new(),
+                    jobs: Vec::new(),
+                });
+            entry.distance = entry.distance.min(c.distance);
+            if !entry.columns.contains(&c.column_name) {
+                entry.columns.push(c.column_name.clone());
+            }
+            for j in &c.jobs {
+                if !entry.jobs.contains(j) {
+                    entry.jobs.push(j.clone());
+                }
+            }
+        }
+        let mut out: Vec<ColumnTableOut> = tmap.into_values().collect();
+        for item in &mut out {
+            item.columns.sort();
+            item.jobs.sort();
+        }
+        out.sort_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then_with(|| a.full_table_name.cmp(&b.full_table_name))
+        });
+        out
+    };
+    let upstream_tables = aggregate_col_tables(&upstream_columns);
+    let downstream_tables = aggregate_col_tables(&downstream_columns);
+
+    let mut up_dist_map: HashMap<(&str, &str), u32> = HashMap::default();
+    up_dist_map.insert((full_table, col_name), 0);
+    up_dist_map.insert((full_table, "*"), 0);
+    for ((t, c), d) in &sub.up_distances {
+        up_dist_map.entry((t.as_str(), c.as_str())).or_insert(*d);
+    }
+    let mut down_dist_map: HashMap<(&str, &str), u32> = HashMap::default();
+    down_dist_map.insert((full_table, col_name), 0);
+    down_dist_map.insert((full_table, "*"), 0);
+    for ((t, c), d) in &sub.down_distances {
+        down_dist_map.entry((t.as_str(), c.as_str())).or_insert(*d);
+    }
+
+    let mut up_job_map: HashMap<String, ColumnJobOut> = HashMap::default();
+    let mut down_job_map: HashMap<String, ColumnJobOut> = HashMap::default();
+    for ce in &edges_out {
+        let sk = (ce.source_table.as_str(), ce.source_column.as_str());
+        let tk = (ce.target_table.as_str(), ce.target_column.as_str());
+        if let (Some(_), Some(&td)) = (up_dist_map.get(&sk), up_dist_map.get(&tk)) {
+            for jn in &ce.jobs {
+                let (_, dag, task) = split_job_name(jn).unwrap_or_default();
+                let entry = up_job_map
+                    .entry(jn.clone())
+                    .or_insert_with(|| ColumnJobOut {
+                        job_name: jn.clone(),
+                        dag_name: dag,
+                        task_name: task,
+                        distance: td + 1,
+                        via_tables: Vec::new(),
+                        via_columns: Vec::new(),
+                    });
+                entry.distance = entry.distance.min(td + 1);
+                for tbl in [&ce.source_table, &ce.target_table] {
+                    if !entry.via_tables.contains(tbl) {
+                        entry.via_tables.push(tbl.clone());
+                    }
+                }
+                for qc in [&ce.source, &ce.target] {
+                    if !entry.via_columns.contains(qc) {
+                        entry.via_columns.push(qc.clone());
+                    }
+                }
+            }
+        }
+        if let (Some(&sd), Some(_)) = (down_dist_map.get(&sk), down_dist_map.get(&tk)) {
+            for jn in &ce.jobs {
+                let (_, dag, task) = split_job_name(jn).unwrap_or_default();
+                let entry = down_job_map
+                    .entry(jn.clone())
+                    .or_insert_with(|| ColumnJobOut {
+                        job_name: jn.clone(),
+                        dag_name: dag,
+                        task_name: task,
+                        distance: sd + 1,
+                        via_tables: Vec::new(),
+                        via_columns: Vec::new(),
+                    });
+                entry.distance = entry.distance.min(sd + 1);
+                for tbl in [&ce.source_table, &ce.target_table] {
+                    if !entry.via_tables.contains(tbl) {
+                        entry.via_tables.push(tbl.clone());
+                    }
+                }
+                for qc in [&ce.source, &ce.target] {
+                    if !entry.via_columns.contains(qc) {
+                        entry.via_columns.push(qc.clone());
+                    }
+                }
+            }
+        }
+    }
+    let finish_col_jobs = |map: HashMap<String, ColumnJobOut>| -> Vec<ColumnJobOut> {
+        let mut out: Vec<ColumnJobOut> = map.into_values().collect();
+        for item in &mut out {
+            item.via_tables.sort();
+            item.via_columns.sort();
+        }
+        out.sort_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then_with(|| a.job_name.cmp(&b.job_name))
+        });
+        out
+    };
+    let upstream_jobs = finish_col_jobs(up_job_map);
+    let downstream_jobs = finish_col_jobs(down_job_map);
+
     // 提取 `库名.表名.字段名` 完整血缘路径链
     let mut all_qcols: Vec<String> = Vec::new();
     let mut qcol_seen: HashSet<String> = HashSet::default();
@@ -1522,6 +1671,10 @@ fn build_column_lineage_response(
         hops,
         upstream_columns,
         downstream_columns,
+        upstream_tables,
+        downstream_tables,
+        upstream_jobs,
+        downstream_jobs,
         edges: edges_out,
         chains,
         graph: json!({
