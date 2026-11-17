@@ -2,6 +2,35 @@
 name = "hive_sql_parse"
 version = "0.1.0"
 edition = "2021"
+authors = ["wugeer"]
+license = "MIT"
+description = "Hive / Spark SQL lineage analyzer, PostgreSQL append-only store, and web visualizer"
+readme = "README.md"
+
+[package.metadata.deb]
+name = "hive-lineage"
+maintainer = "wugeer"
+copyright = "2026, wugeer"
+license-file = ["LICENSE", "4"]
+depends = ""
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/hive-lineage", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/hive-lineage/README.md", "644"],
+    ["LICENSE", "usr/share/doc/hive-lineage/LICENSE", "644"],
+    ["sql/postgres_ddl.sql", "usr/share/doc/hive-lineage/postgres_ddl.sql", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "hive-lineage"
+auto-req = "no"
+assets = [
+    { source = "target/release/hive-lineage", dest = "/usr/bin/hive-lineage", mode = "0755" },
+    { source = "README.md", dest = "/usr/share/doc/hive-lineage/README.md", mode = "0644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/hive-lineage/LICENSE", mode = "0644", doc = true },
+    { source = "sql/postgres_ddl.sql", dest = "/usr/share/doc/hive-lineage/postgres_ddl.sql", mode = "0644", doc = true },
+]
 
 [dependencies]
 mimalloc = "0.1.52"
