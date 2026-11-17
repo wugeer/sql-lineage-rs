@@ -90,10 +90,15 @@ jobs:
         with:
           key: linux-${{ matrix.target }}
 
-      - name: Install zig, cargo-zigbuild, cargo-deb, cargo-generate-rpm
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.14.1"
+
+      - name: Install cargo-zigbuild, cargo-deb, cargo-generate-rpm
         uses: taiki-e/install-action@v2
         with:
-          tool: zig,cargo-zigbuild,cargo-deb,cargo-generate-rpm
+          tool: cargo-zigbuild,cargo-deb,cargo-generate-rpm
 
       - name: Build static musl binary
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}
