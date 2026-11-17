@@ -36,6 +36,8 @@ pub struct SessionGraph {
     /// 列级索引：(table, col) -> col_edge 下标集合
     col_out: HashMap<(u32, Box<str>), Vec<u32>>,
     col_in: HashMap<(u32, Box<str>), Vec<u32>>,
+    /// 表级出边列索引：source_table -> col_edge 下标集合（用于快速裁剪子图列边）
+    tbl_col_out: Vec<Vec<u32>>,
     name_to_id: HashMap<String, u32>,
     /// 库名 -> 表数量（按出现顺序）
     dbs: Vec<(String, u32)>,
@@ -103,11 +105,15 @@ impl SessionGraph {
         let mut col_in: HashMap<(u32, Box<str>), Vec<u32>> = HashMap::default();
         let mut col_deg_out: HashMap<(u32, Box<str>), u32> = HashMap::default();
         let mut col_deg_in: HashMap<(u32, Box<str>), u32> = HashMap::default();
+        let mut tbl_col_out: Vec<Vec<u32>> = vec![Vec::new(); n];
         for (i, e) in r.column_edges.iter().enumerate() {
             let sk = (e.source_table as u32, e.source_column.as_str().into());
             let tk = (e.target_table as u32, e.target_column.as_str().into());
             col_out.entry(sk.clone()).or_default().push(i as u32);
             col_in.entry(tk.clone()).or_default().push(i as u32);
+            if e.source_table < n {
+                tbl_col_out[e.source_table].push(i as u32);
+            }
             *col_deg_out.entry(sk).or_default() += 1;
             *col_deg_in.entry(tk).or_default() += 1;
         }
@@ -138,6 +144,7 @@ impl SessionGraph {
             levels,
             col_out,
             col_in,
+            tbl_col_out,
             name_to_id,
             dbs,
             col_deg_out,
@@ -260,12 +267,30 @@ impl SessionGraph {
             }
         }
         let mut edges: HashSet<(usize, usize)> = HashSet::default();
-        for e in &self.ws.result.table_edges {
-            if nodes.contains(&e.source) && nodes.contains(&e.target) {
-                edges.insert((e.source, e.target));
+        for &s in &nodes {
+            for &t in &self.down[s] {
+                let t = t as usize;
+                if nodes.contains(&t) {
+                    edges.insert((s, t));
+                }
             }
         }
         (nodes, edges)
+    }
+
+    fn col_edges_for_nodes(&self, nodes: &HashSet<usize>) -> HashSet<u32> {
+        let mut set: HashSet<u32> = HashSet::default();
+        for &tid in nodes {
+            if let Some(eis) = self.tbl_col_out.get(tid) {
+                for &ei in eis {
+                    let e = &self.ws.result.column_edges[ei as usize];
+                    if nodes.contains(&e.target_table) {
+                        set.insert(ei);
+                    }
+                }
+            }
+        }
+        set
     }
 
     /// 列级全链路追踪（上游 + 下游）
@@ -345,8 +370,16 @@ fn get_session(
 fn store_session(state: &AppState, g: SessionGraph) -> String {
     let mut map = state.sessions.lock().unwrap();
     if map.len() >= MAX_SESSIONS {
-        // 简单淘汰最老 session id 前缀（s1 < s2 ...）
-        if let Some(oldest) = map.keys().min().cloned() {
+        // 按会话序号数值淘汰最老 session（避免 "s10" < "s2" 的字典序误淘汰）
+        if let Some(oldest) = map
+            .keys()
+            .min_by_key(|k| {
+                k.strip_prefix('s')
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(u64::MAX)
+            })
+            .cloned()
+        {
             map.remove(&oldest);
         }
     }
@@ -384,9 +417,13 @@ struct TextAnalyzeBody {
 }
 
 fn parse_select_flag(v: &Option<String>) -> Option<bool> {
-    match v.as_deref() {
-        Some("yes") | Some("true") | Some("on") | Some("all") => Some(true),
-        Some("no") | Some("false") | Some("off") | Some("none") => Some(false),
+    match v
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("yes" | "true" | "on" | "all") => Some(true),
+        Some("no" | "false" | "off" | "none") => Some(false),
         _ => None,
     }
 }
@@ -485,12 +522,7 @@ fn analyze_response_with_save(
         focus_table = Some(focus);
         g.table_subgraph(focus, 1, "both")
     };
-    let col_edge_set: HashSet<u32> = (0..g.ws.result.column_edges.len() as u32)
-        .filter(|&ei| {
-            let e = &g.ws.result.column_edges[ei as usize];
-            nodes.contains(&e.source_table) && nodes.contains(&e.target_table)
-        })
-        .collect();
+    let col_edge_set = g.col_edges_for_nodes(&nodes);
     let tables_json: Vec<serde_json::Value> = {
         let mut v: Vec<serde_json::Value> = nodes
             .iter()
@@ -879,12 +911,7 @@ async fn api_subgraph(
         })));
     }
     let (nodes, edges) = g.table_subgraph(p.table, p.hops.unwrap_or(1), direction);
-    let col_edge_set: HashSet<u32> = (0..r.column_edges.len() as u32)
-        .filter(|&ei| {
-            let e = &r.column_edges[ei as usize];
-            nodes.contains(&e.source_table) && nodes.contains(&e.target_table)
-        })
-        .collect();
+    let col_edge_set = g.col_edges_for_nodes(&nodes);
     let mut nodes_json: Vec<serde_json::Value> = nodes
         .iter()
         .map(|&tid| {
@@ -977,7 +1004,7 @@ async fn api_statements(
             items.push(json!({
                 "index": s.index, "file": r.files.get(s.file).map(|f| f.name.as_str()).unwrap_or(""),
                 "line": s.line, "kind": s.kind, "status": s.status, "error": s.error,
-                "preview": preview, "truncated": sql.len() > 200,
+                "preview": preview, "truncated": sql.chars().count() > 200,
                 "targets": s.targets, "sources": s.sources,
             }));
         }
@@ -1049,7 +1076,11 @@ async fn api_lookup_table(
     Path((id, name)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let g = get_session(&state, &id)?;
-    match g.name_to_id.get(&name) {
+    let found = g
+        .name_to_id
+        .get(&name)
+        .or_else(|| g.name_to_id.get(&name.trim().to_ascii_lowercase()));
+    match found {
         Some(&tid) => Ok(Json(g.table_json(tid as usize))),
         None => Err(err(StatusCode::NOT_FOUND, "表不存在")),
     }
@@ -2538,5 +2569,53 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn server_edge_cases() {
+        assert_eq!(parse_select_flag(&Some(" YES ".into())), Some(true));
+        assert_eq!(parse_select_flag(&Some("False".into())), Some(false));
+
+        // 超过 MAX_SESSIONS 时按数字序号淘汰 s1/s2/s3，保留 s10
+        let state = st();
+        for _ in 0..(MAX_SESSIONS + 3) {
+            store_session(&state, g_of("SELECT a FROM dw.s"));
+        }
+        {
+            let map = state.sessions.lock().unwrap();
+            assert_eq!(map.len(), MAX_SESSIONS);
+            assert!(!map.contains_key("s1"));
+            assert!(!map.contains_key("s2"));
+            assert!(!map.contains_key("s3"));
+            assert!(map.contains_key("s10"));
+            assert!(map.contains_key(&format!("s{}", MAX_SESSIONS + 3)));
+        }
+
+        // 中文语句超过 200 字节但不足 200 字符 -> truncated=false；且大小写查表命中
+        let zh = "中".repeat(80);
+        let sql_zh = format!("INSERT INTO dw.t SELECT '{zh}' AS note FROM dw.s");
+        assert!(sql_zh.len() > 200 && sql_zh.chars().count() < 200);
+        let sid = store_session(&state, g_of(&sql_zh));
+        let stmts = api_statements(
+            State(state.clone()),
+            Path(sid.clone()),
+            Query(StmtQuery {
+                ids: None,
+                offset: None,
+                limit: None,
+                status: None,
+                kind: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(stmts["items"][0]["truncated"], false);
+
+        let looked = api_lookup_table(State(state), Path((sid, "DW.T".into())))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(looked["name"], "dw.t");
     }
 }

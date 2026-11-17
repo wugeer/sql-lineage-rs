@@ -161,7 +161,7 @@ enum QuerySubcmd {
 }
 
 fn parse_select_mode(s: &str) -> Option<bool> {
-    match s {
+    match s.trim().to_ascii_lowercase().as_str() {
         "yes" | "true" | "on" | "all" => Some(true),
         "no" | "false" | "off" | "none" => Some(false),
         _ => None,
